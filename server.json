@@ -1,0 +1,40 @@
+{
+  "apps": [
+    {
+      "name": "ai-cam-security",
+      "cwd": ".",
+      "script": "poetry",
+      "args": "run python -m app",
+      "interpreter": "none",
+      "watch": [
+        "app",
+        ".env*"
+      ],
+      "ignore_watch": [
+        "app_tests",
+        "volume"
+      ],
+      "restart_delay": 5000,
+      "max_restarts": 3,
+      "log_date_format": "DD-MM-YYYY HH:mm:ss.SSS Z",
+      "watch_options": {
+        "followSymlinks": false
+      },
+      "env": {
+        "ENV": "",
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONPYCACHEPREFIX": "./__pycache__"
+      },
+      "env_dev": {
+        "ENV": "dev",
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONPYCACHEPREFIX": "./__pycache__"
+      },
+      "env_prod": {
+        "ENV": "prod",
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONPYCACHEPREFIX": "./__pycache__"
+      }
+    }
+  ]
+}

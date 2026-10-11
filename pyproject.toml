@@ -1,0 +1,31 @@
+[project]
+name = "ai-cam-security"
+version = "0.0.1"
+description = "RTSP camera AI service and Telegram alarm management foundation"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "docs/licenses/nanodet-LICENSE"]
+authors = [{name = "Dmitrii Gorbenko", email = "connect@cyberdog.top"}]
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+    "python-dotenv>=1.2.3,<2.0",
+    "opencv-python-headless>=4.13,<5",
+    "numpy>=2.2,<3",
+    "tzdata>=2025.2; sys_platform == 'win32'",
+    "python-telegram-bot>=22.5,<23",
+]
+
+[tool.poetry]
+requires-poetry = ">=2.0"
+packages = [{include = "app"}]
+
+[project.scripts]
+ai-cam-security = "app.cli:start"
+
+[tool.poetry.group.dev.dependencies]
+mypy = "^2.3.1"
+
+[build-system]
+requires = ["poetry-core>=2.5.0,<3.0"]
+build-backend = "poetry.core.masonry.api"
+

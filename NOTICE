@@ -1,0 +1,21 @@
+ai-cam-security
+Copyright 2026 Dmitrii Gorbenko
+
+This project includes code adapted from OpenCV Zoo's NanoDet implementation
+and demo at revision 47534e27c9851bb1128ccc0102f1145e27f23f98:
+https://github.com/opencv/opencv_zoo/tree/47534e27c9851bb1128ccc0102f1145e27f23f98/models/object_detection_nanodet
+
+Upstream contributor: Sri Siddarth Chakaravarthy, Google Summer of Code 2022,
+OpenCV. The upstream code and model files are licensed under Apache-2.0;
+the original license is included at docs/licenses/nanodet-LICENSE.
+
+app/services/detection.py modifies that implementation for person filtering,
+stable softmax, inclusive confidence thresholds, bounded immutable frames,
+safe fault reporting and inference timing.
+
+system/models/person.onnx and system/models/person_int8.onnx are the unmodified
+FP32 and INT8 OpenCV Zoo NanoDet models. Their original filenames, revision
+and SHA256 checksums are documented in docs/benchmarks/pi5-detection.md.
+
+Local WAV recordings and camera footage are not part of the public distribution.
+Their licenses are not covered by this project's license.

@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Camera service",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "app",
+      "cwd": "${workspaceFolder}",
+      "args": ["--env", "dev"],
+      "console": "integratedTerminal"
+    }
+  ]
+}

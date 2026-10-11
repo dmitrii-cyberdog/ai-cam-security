@@ -1,0 +1,28 @@
+[Unit]
+Description=Local camera person detection and audio alarm
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ai-cam-security
+Group=ai-cam-security
+SupplementaryGroups=audio
+WorkingDirectory=/opt/ai-cam-security
+ExecStart=/opt/ai-cam-security/.venv/bin/python -m app --env prod
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ai-cam-security/volume
+UMask=0077
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+[Install]
+WantedBy=multi-user.target
