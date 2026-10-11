@@ -23,7 +23,7 @@ packages = [{include = "app"}]
 ai-cam-security = "app.cli:start"
 
 [tool.poetry.group.dev.dependencies]
-mypy = "^2.3.1"
+mypy = "^2.4.0"
 
 [build-system]
 requires = ["poetry-core>=2.5.0,<3.0"]
