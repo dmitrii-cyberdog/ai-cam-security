@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import cv2
 import numpy as np
 
-from app.services.telegram import COMMANDS, COMMAND_TITLES, TelegramService, TransportError
+from app.services.telegram import COMMANDS, COMMAND_KEYBOARD, COMMAND_TITLES, TelegramService, TransportError
 from app.services.models import Notification
 from app_tests.test_alarm import config, observation
 
@@ -78,6 +78,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image.shape, frame.image.shape)
         self.assertIn("Time (UTC): 2026-09-27T10:00:00Z", sent["caption"])
         self.assertEqual(sent["parse_mode"], "HTML")
+        self.assertIs(sent["reply_markup"], COMMAND_KEYBOARD)
         self.assertEqual(self.service.health(), "healthy")
 
     async def test_photo_unavailable_timeout_and_encoding_failure(self):
@@ -285,6 +286,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
             await self.service._handle(update, None)
 
             update.message.reply_text.assert_awaited_once()
+            self.assertIs(update.message.reply_text.call_args.kwargs["reply_markup"], COMMAND_KEYBOARD)
 
             if name in {"status", "help", "photo"}:
                 self.execute.assert_not_awaited()
@@ -539,6 +541,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret-token", str(raised.exception))
         self.assertEqual(app.bot.send_photo.call_args.kwargs["parse_mode"], "HTML")
         self.assertEqual(app.bot.send_photo.call_args.kwargs["photo"], b"jpeg")
+        self.assertIs(app.bot.send_photo.call_args.kwargs["reply_markup"], COMMAND_KEYBOARD)
 
     async def test_partial_start_invalid_token_cleans_up_and_waits(self):
         from telegram.error import InvalidToken
@@ -578,6 +581,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
 
         app.bot.send_message.assert_awaited_once()
         self.assertEqual(app.bot.send_message.call_args.kwargs["parse_mode"], "HTML")
+        self.assertIs(app.bot.send_message.call_args.kwargs["reply_markup"], COMMAND_KEYBOARD)
         self.assertEqual(self.service.health(), "healthy")
 
     async def test_commands_wait_for_reconnect_cutoff(self):

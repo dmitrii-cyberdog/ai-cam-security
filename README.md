@@ -162,9 +162,10 @@ chats. Edited, duplicate, old, future-dated and pre-reconnect commands are rejec
 
 On each full service start or restart, the bot registers all seven commands in
 Telegram's command menu and sends a startup notice to `TELEGRAM_CHAT_ID` with the
-start time and a reminder that it started disarmed. The startup notice and `/status`
-replies include a persistent keyboard with all commands. Keyboard buttons use the
-same authorization and freshness checks as typed commands. If Telegram is offline
+start time and a reminder that it started disarmed. Every outgoing Telegram message,
+including photos and notifications, includes a persistent keyboard with all
+commands. Keyboard buttons use the same authorization and freshness checks as
+typed commands. If Telegram is offline
 at startup, setup and delivery retry when connectivity returns. Successful startup
 notices are not repeated on a Telegram reconnect.
 
