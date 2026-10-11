@@ -4,9 +4,12 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import cv2
+import numpy as np
+
 from app.services.telegram import COMMANDS, COMMAND_TITLES, TelegramService, TransportError
 from app.services.models import Notification
-from app_tests.test_alarm import config
+from app_tests.test_alarm import config, observation
 
 #
 #
@@ -17,6 +20,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.config = config()
         self.config["telegram"] = {"token": "123:secret-token", "allowedUserIds": [42], "notificationChatId": 42}
         self.execute = AsyncMock(return_value="disarm")
+        self.get_frame = AsyncMock(return_value=None)
         self.status = {
             "armed": False, "phase": "idle", "manual": False,
             "suppression": False, "suppressionReason": "", "lastCommandResult": "Started disarmed",
@@ -25,11 +29,11 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
             "notifications": {"queued_count": 1, "retained_image_bytes": 1048576, "dropped_count": 2, "unreported_drops": 1},
             "token": "123:secret-token",
         }
-        self.service = TelegramService(self.config, self.execute, lambda: self.status)
+        self.service = TelegramService(self.config, self.execute, lambda: self.status, self.get_frame)
         self.service._cutoff = datetime.now(timezone.utc) - timedelta(seconds=1)
 
     def update(self, **overrides):
-        message = SimpleNamespace(date=datetime.now(timezone.utc), text="/disarm", reply_text=AsyncMock())
+        message = SimpleNamespace(date=datetime.now(timezone.utc), text="/disarm", reply_text=AsyncMock(), reply_photo=AsyncMock())
         result = SimpleNamespace(update_id=1, effective_user=SimpleNamespace(id=42), effective_chat=SimpleNamespace(type="private"), message=message, edited_message=None)
         for name, value in overrides.items():
             setattr(result, name, value)
@@ -53,6 +57,88 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         await self.service._handle(update, None)
         await self.service._handle(update, None)
         self.execute.assert_awaited_once_with("disarm")
+
+    async def test_photo_sends_jpeg_to_requesting_chat_without_alarm_command(self):
+        frame = observation(1, 0, 0).frame
+        self.get_frame.return_value = frame
+        self.config["telegram"]["notificationChatId"] = None
+        update = self.update()
+        update.message.text = "/photo"
+
+        await self.service._handle(update, None)
+        await self.service._handle(update, None)
+
+        self.get_frame.assert_awaited_once_with()
+        update.message.reply_photo.assert_awaited_once()
+        update.message.reply_text.assert_not_awaited()
+        self.execute.assert_not_awaited()
+        sent = update.message.reply_photo.call_args.kwargs
+        image = cv2.imdecode(np.frombuffer(sent["photo"], dtype=np.uint8), cv2.IMREAD_COLOR)
+
+        self.assertEqual(image.shape, frame.image.shape)
+        self.assertIn(frame.captured_utc.isoformat(), sent["caption"])
+        self.assertEqual(sent["parse_mode"], "HTML")
+        self.assertEqual(self.service.health(), "healthy")
+
+    async def test_photo_unavailable_timeout_and_encoding_failure(self):
+        frame = observation(1, 0, 0).frame
+
+        for index, (value, error, encoding) in enumerate((
+            (None, None, (False, None)),
+            (None, asyncio.TimeoutError(), (False, None)),
+            (frame, None, (False, None)),
+            (frame, None, cv2.error("encoding failed")),
+        )):
+            self.get_frame.return_value = value
+            self.get_frame.side_effect = error
+            update = self.update(update_id=index + 1)
+            update.message.text = "/photo"
+
+            with patch("app.services.telegram.cv2.imencode") as encode:
+                if isinstance(encoding, Exception):
+                    encode.side_effect = encoding
+                else:
+                    encode.return_value = encoding
+
+                await self.service._handle(update, None)
+
+            update.message.reply_photo.assert_not_awaited()
+            self.assertIn("Photo unavailable", update.message.reply_text.call_args.args[0])
+
+        self.execute.assert_not_awaited()
+
+    async def test_photo_authorization_and_freshness_checks_before_capture(self):
+        for fields in (
+            {"effective_user": SimpleNamespace(id=100)},
+            {"effective_chat": SimpleNamespace(type="group")},
+            {"edited_message": object()},
+        ):
+            update = self.update(**fields)
+            update.message.text = "/photo"
+
+            await self.service._handle(update, None)
+
+            update.message.reply_photo.assert_not_awaited()
+
+        update = self.update()
+        update.message.text = "/photo"
+        update.message.date -= timedelta(seconds=31)
+
+        await self.service._handle(update, None)
+
+        self.get_frame.assert_not_awaited()
+
+    async def test_failed_photo_delivery_sets_offline_health(self):
+        from telegram.error import NetworkError
+
+        self.get_frame.return_value = observation(1, 0, 0).frame
+        update = self.update()
+        update.message.text = "/photo"
+        update.message.reply_photo.side_effect = NetworkError("network unavailable")
+
+        await self.service._handle(update, None)
+
+        self.assertEqual(self.service.health(), "offline")
 
     async def test_unknown_missing_group_and_edited_are_rejected(self):
         for fields in ({"effective_user": None}, {"effective_user": SimpleNamespace(id=100)}, {"effective_chat": SimpleNamespace(type="group")}, {"edited_message": object()}):
@@ -200,9 +286,13 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
 
             update.message.reply_text.assert_awaited_once()
 
-            if name in {"status", "help"}:
+            if name in {"status", "help", "photo"}:
                 self.execute.assert_not_awaited()
-                self.assertIn("Camera alarm status" if name == "status" else "Camera alarm commands", update.message.reply_text.call_args.args[0])
+
+                if name == "photo":
+                    self.get_frame.assert_awaited_once_with()
+                else:
+                    self.assertIn("Camera alarm status" if name == "status" else "Camera alarm commands", update.message.reply_text.call_args.args[0])
             else:
                 self.execute.assert_awaited_once_with(name)
 
@@ -411,7 +501,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_notification_chat_still_registers_commands(self):
         self.config["telegram"]["notificationChatId"] = None
-        service = TelegramService(self.config, self.execute, lambda: {"armed": False})
+        service = TelegramService(self.config, self.execute, lambda: {"armed": False}, self.get_frame)
         stop = asyncio.Event()
         app = self.application()
         app.updater.start_polling.side_effect = lambda **kwargs: stop.set()
@@ -424,7 +514,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unconfigured_telegram_does_not_initialize_or_notify(self):
         self.config["telegram"]["token"] = ""
-        service = TelegramService(self.config, self.execute, lambda: {"armed": False})
+        service = TelegramService(self.config, self.execute, lambda: {"armed": False}, self.get_frame)
         stop = asyncio.Event()
         stop.set()
 

@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 from app.runtime import Runtime, check_readiness
+from app.services.models import VisionFault
 from app_tests.test_alarm import DAY, config, observation
 
 #
@@ -40,6 +41,50 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.execute("arm")
         for number, at in enumerate((0, 0.5, 1, 1.5, 2), 1):
             await self.feed(at, number)
+
+    async def test_photo_waits_for_new_fresh_observation_while_disarmed(self):
+        self.runtime.vision.poll.return_value = observation(1, 99, 0)
+
+        with patch("app.runtime.time", monotonic=Mock(return_value=100)):
+            await self.runtime._step()
+            task = asyncio.create_task(self.runtime.get_frame())
+            await asyncio.sleep(0)
+
+        self.assertFalse(task.done())
+        self.runtime.vision.poll.return_value = observation(2, 100.1, 0)
+
+        with patch("app.runtime.time", monotonic=Mock(return_value=103)):
+            await self.runtime._step()
+            await asyncio.sleep(0.06)
+
+        self.assertFalse(task.done())
+        fresh = observation(3, 103.1, 0)
+        self.runtime.vision.poll.return_value = fresh
+
+        with patch("app.runtime.time", monotonic=Mock(return_value=103.1)):
+            await self.runtime._step()
+            frame = await asyncio.wait_for(task, 0.5)
+
+        self.assertIs(frame, fresh.frame)
+        self.assertFalse(self.runtime.status()["armed"])
+        self.runtime.audio.play.assert_not_awaited()
+        self.assertEqual(self.events, [])
+
+    async def test_photo_frame_cleared_on_vision_fault_and_shutdown_stops_wait(self):
+        self.runtime.vision.poll.return_value = observation(1, 100, 0)
+
+        with patch("app.runtime.time", monotonic=Mock(return_value=100)):
+            await self.runtime._step()
+
+        self.runtime.vision.poll.return_value = VisionFault("camera_unavailable", 101)
+
+        with patch("app.runtime.time", monotonic=Mock(return_value=101)):
+            await self.runtime._step()
+
+        self.assertIsNone(self.runtime._latest_frame)
+        self.runtime._closing = True
+
+        self.assertIsNone(await self.runtime.get_frame())
 
     async def test_arm_applies_volume_before_arming(self):
         async def set_volume():

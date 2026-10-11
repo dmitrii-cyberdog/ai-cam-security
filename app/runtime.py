@@ -11,7 +11,7 @@ import cv2
 from app.services.alarm import AlarmController, AlarmEffect, PlayKey, StopPlayback
 from app.services.audio import AudioPlayer, resolve_sequence
 from app.services.logger import logger
-from app.services.models import IncidentEvent, Observation, VisionFault
+from app.services.models import Frame, IncidentEvent, Observation, VisionFault
 from app.services.notifications import NotificationWorker
 from app.services.telegram import TelegramService
 from app.services.vision import VisionWorker
@@ -71,7 +71,7 @@ class Runtime:
         self.controller = AlarmController(config)
         self.audio = AudioPlayer(config)
         self.vision = VisionWorker(config)
-        self.telegram = TelegramService(config, self.execute, self.status)
+        self.telegram = TelegramService(config, self.execute, self.status, self.get_frame)
         self.notifications = NotificationWorker(
             self.telegram.send, config["detection"]["maxFrameAgeSeconds"]
         )
@@ -83,7 +83,27 @@ class Runtime:
         self._detector_health = "unavailable"
         self._audio_health = "unchecked"
         self._last_observation: float | None = None
+        self._latest_frame: Frame | None = None
         self._closing = False
+
+    async def get_frame(self) -> Frame | None:
+        requested_at = time.monotonic()
+
+        while not self._closing:
+            frame = self._latest_frame
+            now = time.monotonic()
+
+            if (
+                frame is not None
+                and frame.captured_at >= requested_at
+                and 0 <= now - frame.captured_at
+                <= self.config["detection"]["maxFrameAgeSeconds"]
+            ):
+                return frame
+
+            await asyncio.sleep(0.05)
+
+        return None
 
     async def _readiness(self, name: str) -> str | None:
         errors = await asyncio.to_thread(check_readiness, self.config)
@@ -118,9 +138,12 @@ class Runtime:
     async def execute(self, name: str) -> str:
         self._command_serial += 1
         serial = self._command_serial
+
         if self._closing:
             return "Service stopping"
+
         readiness = await self._readiness(name) if name in {"arm", "alarm"} else None
+
         if serial != self._command_serial or self._closing:
             return "Command superseded"
 
@@ -204,6 +227,7 @@ class Runtime:
             self._camera_health = "unavailable"
             self._detector_health = message.reason
             self._last_observation = None
+            self._latest_frame = None
             await self._apply(self.controller.vision_fault(message.reason, now, utc))
         elif isinstance(message, Observation):
             if (
@@ -213,6 +237,7 @@ class Runtime:
             ):
                 self._camera_health = self._detector_health = "healthy"
                 self._last_observation = message.frame.captured_at
+                self._latest_frame = message.frame
             await self._apply(self.controller.observe(message, now, utc))
         while not self._audio_events.empty():
             generation, event = self._audio_events.get_nowait()

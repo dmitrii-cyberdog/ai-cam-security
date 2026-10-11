@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 from html import escape
 from typing import Any, Dict
 
+import cv2
+
 from telegram import BotCommand, ReplyKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import (
@@ -19,13 +21,14 @@ from telegram.error import (
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.services.logger import logger
-from app.services.models import Notification
+from app.services.models import Frame, Notification
 
 #
 #
 
 COMMANDS = {
     "status": "Show service status",
+    "photo": "Get a current camera photo",
     "arm": "Enable automatic detection",
     "disarm": "Disable automatic detection and stop playback",
     "alarm": "Start the manual siren",
@@ -34,6 +37,7 @@ COMMANDS = {
 }
 COMMAND_TITLES = {
     "status": "📊 Service status",
+    "photo": "📷 Camera photo",
     "arm": "✅ Arm protection",
     "disarm": "❌ Disarm protection",
     "alarm": "🚨 Start siren",
@@ -69,10 +73,12 @@ class TelegramService:
         config: Dict[str, Any],
         execute: Callable[[str], Awaitable[str]],
         get_status: Callable[[], Dict[str, Any]],
+        get_frame: Callable[[], Awaitable[Frame | None]],
     ) -> None:
         self.settings = config["telegram"]
         self.execute = execute
         self.get_status = get_status
+        self.get_frame = get_frame
         self._application: Any = None
         self._health = "unconfigured" if not self.settings["token"] else "offline"
         self._cutoff = datetime.now(timezone.utc)
@@ -258,27 +264,68 @@ class TelegramService:
         if len(self._order) > 1024:
             self._seen.remove(self._order.popleft())
 
+        photo = None
+
         if name == "help":
             reply = HELP
         elif name == "status":
             reply = self._status_reply()
+        elif name == "photo":
+            frame = None
+
+            try:
+                frame = await asyncio.wait_for(self.get_frame(), 5)
+
+                if frame is not None:
+                    ok, encoded = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            cv2.imencode, ".jpg", frame.image,
+                            [cv2.IMWRITE_JPEG_QUALITY, 80],
+                        ),
+                        5,
+                    )
+
+                    if ok:
+                        photo = encoded.tobytes()
+            except (cv2.error, asyncio.TimeoutError):
+                pass
+
+            reply = (
+                f"<b>📷 Camera photo</b>\n\nTime (UTC): {frame.captured_utc.isoformat()}"
+                if photo is not None and frame is not None
+                else "<b>⚠️ Photo unavailable</b>\n\nNo fresh camera photo could be obtained.\n<i>Use /status to check the camera.</i>"
+            )
         else:
             result = await self.execute(name)
             reply = self._command_reply(name, result)
 
         try:
-            await asyncio.wait_for(
-                message.reply_text(
-                    reply,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=COMMAND_KEYBOARD if name == "status" else None,
-                    read_timeout=5,
-                    write_timeout=5,
-                    connect_timeout=5,
-                    pool_timeout=5,
-                ),
-                5,
-            )
+            if photo is not None:
+                await asyncio.wait_for(
+                    message.reply_photo(
+                        photo=photo,
+                        caption=reply,
+                        parse_mode=ParseMode.HTML,
+                        read_timeout=5,
+                        write_timeout=5,
+                        connect_timeout=5,
+                        pool_timeout=5,
+                    ),
+                    5,
+                )
+            else:
+                await asyncio.wait_for(
+                    message.reply_text(
+                        reply,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=COMMAND_KEYBOARD if name == "status" else None,
+                        read_timeout=5,
+                        write_timeout=5,
+                        connect_timeout=5,
+                        pool_timeout=5,
+                    ),
+                    5,
+                )
         except (TelegramError, asyncio.TimeoutError):
             self._health = "offline"
         else:

@@ -160,7 +160,7 @@ inside the worker; health uses safe fault codes.
 Telegram commands are accepted only from configured numeric user IDs in private
 chats. Edited, duplicate, old, future-dated and pre-reconnect commands are rejected.
 
-On each full service start or restart, the bot registers all six commands in
+On each full service start or restart, the bot registers all seven commands in
 Telegram's command menu and sends a startup notice to `TELEGRAM_CHAT_ID` with the
 start time and a reminder that it started disarmed. The startup notice and `/status`
 replies include a persistent keyboard with all commands. Keyboard buttons use the
@@ -176,6 +176,7 @@ explain how to resume automatic alarms with a successful `/arm`.
 | Command | Result |
 | --- | --- |
 | `/status` | Mode, phase, day/night profile, automatic siren periods used/allowed, component and queue health |
+| `/photo` | Wait up to 5 seconds for a frame captured after the request and send it to the requesting chat; report unavailable if no fresh frame arrives |
 | `/arm` | Check camera/detector/audio readiness; apply configured volume, clear suppression and arm |
 | `/disarm` | Disable automation and stop all playback |
 | `/alarm` | Manual siren, including while disarmed; at most 60 seconds |
