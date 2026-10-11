@@ -23,6 +23,35 @@ def event(kind="recognized", number=1, at=None, large=False):
 
 
 class DeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_camera_loss_and_recovery_use_fifo_text_delivery_with_retry(self):
+        sent = []
+        stop = asyncio.Event()
+        attempts = 0
+
+        async def send(note):
+            nonlocal attempts
+            attempts += 1
+
+            if attempts == 1:
+                raise TransportError("offline", retry_after=0)
+
+            sent.append(note)
+
+            if len(sent) == 2:
+                stop.set()
+
+        worker = NotificationWorker(send, 2)
+
+        for kind in ("camera_unavailable", "camera_available"):
+            worker.enqueue(IncidentEvent(0, kind, "", kind, time.monotonic(), DAY, None))
+
+        await asyncio.wait_for(worker.run(stop), 2)
+
+        self.assertEqual([note.kind for note in sent], ["camera_unavailable", "camera_available"])
+        self.assertTrue(all(note.photo is None for note in sent))
+        self.assertEqual(attempts, 3)
+        self.assertEqual(worker.health()["dropped_count"], 0)
+
     async def test_fifo_retry_and_event_time_photo(self):
         sent = []
         stop = asyncio.Event()

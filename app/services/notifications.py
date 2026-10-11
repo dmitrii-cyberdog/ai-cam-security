@@ -16,6 +16,16 @@ from app.services.telegram import TransportError
 
 
 def prepare_notification(event: IncidentEvent, max_frame_age: float) -> Notification:
+    if event.kind in {"camera_unavailable", "camera_available"}:
+        text = (
+            "<b>✅ RTSP camera stream available again</b>\n\nFresh camera frames are being received."
+            if event.kind == "camera_available"
+            else "<b>⚠️ RTSP camera stream unavailable</b>\n\nNo fresh camera frames are reaching the service.\n<i>Check the camera and its network connection.</i>"
+        )
+        text += f"\n\n🕒 Time (UTC): {event.at_utc.isoformat()}"
+
+        return Notification(0, event.kind, event.at, text, None)
+
     titles = {"recognized": "👤 Person recognized", "still_there": "👀 Person is still there", "activated": "🚨 Alarm activated", "deactivated": "⏹️ Alarm deactivated", "alarm_photo": "🚨 Alarm in progress"}
     reasons = {
         "presence_confirmed": "Person detected and confirmed",

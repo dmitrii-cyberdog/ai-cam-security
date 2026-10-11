@@ -68,7 +68,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(frame, fresh.frame)
         self.assertFalse(self.runtime.status()["armed"])
         self.runtime.audio.play.assert_not_awaited()
-        self.assertEqual(self.events, [])
+        self.assertEqual(
+            [event.kind for event in self.events],
+            ["camera_unavailable", "camera_available"],
+        )
 
     async def test_photo_frame_cleared_on_vision_fault_and_shutdown_stops_wait(self):
         self.runtime.vision.poll.return_value = observation(1, 100, 0)
@@ -100,6 +103,112 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         await self.runtime.execute("arm")
         self.assertEqual(self.runtime.audio.set_volume.await_count, 2)
+
+    async def test_camera_loss_and_recovery_notify_once_while_disarmed(self):
+        for at, message in (
+            (100, observation(1, 100, 0)),
+            (101, VisionFault("camera_unavailable", 101)),
+            (101.1, VisionFault("camera_unavailable", 101.1)),
+            (102, observation(2, 99, 0)),
+            (103, observation(3, 103, 0)),
+            (104, observation(4, 104, 0)),
+        ):
+            self.runtime.vision.poll.return_value = message
+
+            with patch("app.runtime.time", monotonic=Mock(return_value=at)):
+                await self.runtime._step()
+
+        self.assertEqual(
+            [event.kind for event in self.events],
+            ["camera_unavailable", "camera_available"],
+        )
+        self.assertEqual([event.at for event in self.events], [101, 103])
+        self.assertTrue(all(event.frame is None for event in self.events))
+        self.assertFalse(self.runtime.status()["armed"])
+        self.runtime.audio.play.assert_not_awaited()
+
+    async def test_initial_camera_failure_notifies_after_startup_budget(self):
+        self.runtime._camera_health = "unavailable"
+        self.runtime._last_observation = None
+        self.runtime._camera_check_started_at = 100
+        deadline = 115 + (
+            self.runtime.config["camera"]["openTimeoutMs"]
+            + self.runtime.config["camera"]["readTimeoutMs"]
+        ) / 1000
+
+        for at in (100, deadline - 0.1):
+            self.runtime.vision.poll.return_value = VisionFault("camera_unavailable", at)
+
+            with patch("app.runtime.time", monotonic=Mock(return_value=at)):
+                await self.runtime._step()
+
+        self.assertEqual(self.events, [])
+        self.runtime.vision.poll.return_value = None
+
+        for at in (deadline, deadline + 1):
+            with patch("app.runtime.time", monotonic=Mock(return_value=at)):
+                await self.runtime._step()
+
+        self.assertEqual([event.kind for event in self.events], ["camera_unavailable"])
+        self.runtime.vision.poll.return_value = observation(1, deadline + 2, 0)
+
+        with patch("app.runtime.time", monotonic=Mock(return_value=deadline + 2)):
+            await self.runtime._step()
+
+        self.assertEqual(
+            [event.kind for event in self.events],
+            ["camera_unavailable", "camera_available"],
+        )
+
+    async def test_stale_camera_notifies_and_fresh_poll_avoids_transient_loss(self):
+        for at, message in (
+            (100, observation(1, 100, 0)),
+            (103, observation(2, 103, 0)),
+        ):
+            self.runtime.vision.poll.return_value = message
+
+            with patch("app.runtime.time", monotonic=Mock(return_value=at)):
+                await self.runtime._step()
+
+        self.assertEqual(self.events, [])
+
+        for at, message in (
+            (106, None),
+            (106.1, observation(3, 103, 0)),
+            (107, observation(4, 107, 0)),
+        ):
+            self.runtime.vision.poll.return_value = message
+
+            with patch("app.runtime.time", monotonic=Mock(return_value=at)):
+                await self.runtime._step()
+
+        self.assertEqual(
+            [event.kind for event in self.events],
+            ["camera_unavailable", "camera_available"],
+        )
+        self.assertEqual([event.at for event in self.events], [106, 107])
+
+    async def test_camera_notices_preserve_armed_mode_and_audio_fault_suppression(self):
+        self.runtime.controller.command("arm", 0, DAY)
+        self.runtime.controller.suppression = "audio_fault"
+
+        for at, message in (
+            (100, observation(1, 100, 0)),
+            (101, VisionFault("camera_unavailable", 101)),
+            (102, observation(2, 102, 0)),
+        ):
+            self.runtime.vision.poll.return_value = message
+
+            with patch("app.runtime.time", monotonic=Mock(return_value=at)):
+                await self.runtime._step()
+
+        self.assertTrue(self.runtime.status()["armed"])
+        self.assertEqual(self.runtime.status()["suppressionReason"], "audio_fault")
+        self.assertEqual(
+            [event.kind for event in self.events],
+            ["camera_unavailable", "camera_available"],
+        )
+        self.runtime.audio.play.assert_not_awaited()
 
     async def test_camera_loss_during_volume_application_prevents_arm(self):
         async def set_volume():
@@ -364,7 +473,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [event.kind for event in self.events],
-            ["activated", "alarm_photo", "deactivated"],
+            ["activated", "alarm_photo", "deactivated", "camera_unavailable"],
         )
 
     async def test_unconfigured_telegram_does_not_stop_vision(self):

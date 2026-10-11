@@ -84,6 +84,8 @@ class Runtime:
         self._audio_health = "unchecked"
         self._last_observation: float | None = None
         self._latest_frame: Frame | None = None
+        self._stream_available: bool | None = None
+        self._camera_check_started_at = time.monotonic()
         self._closing = False
 
     async def get_frame(self) -> Frame | None:
@@ -213,6 +215,33 @@ class Runtime:
             if isinstance(effect, IncidentEvent):
                 self.notifications.enqueue(effect)
 
+    def _notify_camera_status(self, now: float, utc: datetime) -> None:
+        available = self._camera_health == "healthy"
+
+        if self._stream_available is None:
+            if available:
+                self._stream_available = True
+
+                return
+
+            startup_budget = 15 + (
+                self.config["camera"]["openTimeoutMs"]
+                + self.config["camera"]["readTimeoutMs"]
+            ) / 1000
+
+            if now - self._camera_check_started_at < startup_budget:
+                return
+
+        if available == self._stream_available:
+            return
+
+        self._stream_available = available
+        kind = "camera_available" if available else "camera_unavailable"
+
+        self.notifications.enqueue(
+            IncidentEvent(0, kind, "", kind, now, utc, None)
+        )
+
     async def _step(self) -> None:
         now, utc = time.monotonic(), datetime.now(timezone.utc)
         await self._apply(self.controller.tick(now, utc))
@@ -239,6 +268,9 @@ class Runtime:
                 self._last_observation = message.frame.captured_at
                 self._latest_frame = message.frame
             await self._apply(self.controller.observe(message, now, utc))
+
+        self._notify_camera_status(now, utc)
+
         while not self._audio_events.empty():
             generation, event = self._audio_events.get_nowait()
             await self._apply(self.controller.audio_event(generation, event, now, utc))

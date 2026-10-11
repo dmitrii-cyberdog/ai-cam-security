@@ -22,6 +22,22 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual([note.photo is not None for note in notes], [True, False, True, True])
         self.assertEqual([note.text.splitlines()[0] for note in notes], ["<b>👤 Person recognized</b>", "<b>👀 Person is still there</b>", "<b>🚨 Alarm activated</b>", "<b>⏹️ Alarm deactivated</b>"])
 
+    def test_camera_availability_notices_are_timestamped_text_without_incident(self):
+        for kind, heading in (
+            ("camera_unavailable", "⚠️ RTSP camera stream unavailable"),
+            ("camera_available", "✅ RTSP camera stream available again"),
+        ):
+            event = IncidentEvent(0, kind, "", kind, 100, DAY, None)
+            note = prepare_notification(event, 2)
+
+            self.assertEqual(note.kind, kind)
+            self.assertEqual(note.occurred_at, 100)
+            self.assertIsNone(note.photo)
+            self.assertIn(f"<b>{heading}</b>", note.text)
+            self.assertIn(DAY.isoformat(), note.text)
+            self.assertNotIn("Incident", note.text)
+            self.assertNotIn("Photo unavailable", note.text)
+
     def test_delayed_send_keeps_event_photo(self):
         event = self.event("recognized")
         expected = cv2.imencode(".jpg", event.frame.image, [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()

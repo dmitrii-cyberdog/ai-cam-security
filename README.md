@@ -236,6 +236,15 @@ audio, provided the camera remains reachable on the local network. Telegram
 commands and delivery need connectivity. A full restart during the outage starts
 disarmed; Telegram must reconnect before `/arm` can be received.
 
+The service sends a text notification to `TELEGRAM_CHAT_ID` when the RTSP camera
+stream becomes unavailable and another when fresh frames return, even while
+disarmed. Capture/vision faults and frames older than
+`DETECTION_MAX_FRAME_AGE_SECONDS` count as unavailable. Repeated checks in the same
+state do not repeat the notice. Startup allows 15 seconds plus the configured
+camera open/read timeouts before reporting that no initial frames arrived; a
+successful initial connection sends no recovery notice. These notices use the
+same bounded delivery queue and retry policy as alarm notifications.
+
 Notifications contain event-time images for recognition, activation and deactivation;
 the still-there transition is text only. Set `DETECTION_ON_ALARM_SEND_PHOTO_EVERY_MS`
 to send additional photos during automatic and manual sirens. The first periodic
