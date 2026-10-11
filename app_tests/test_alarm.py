@@ -73,6 +73,75 @@ class AlarmTests(unittest.TestCase):
         self.observe(2.5, utc=NIGHT)
         self.assertEqual(kinds(self.observe(3, utc=NIGHT)), ["recognized"])
 
+    def test_configured_confirmation_durations(self):
+        for utc, duration in ((DAY, 6), (NIGHT, 8)):
+            with self.subTest(utc=utc):
+                self.setUp()
+                self.controller.detection["dayConfirmSeconds"] = 6
+                self.controller.detection["nightConfirmSeconds"] = 8
+
+                for half_second in range(duration * 2):
+                    self.assertEqual(self.observe(half_second / 2, utc=utc), [])
+
+                self.assertEqual(kinds(self.observe(duration, utc=utc)), ["recognized"])
+
+    def test_short_confirmation_still_requires_three_distinct_frames(self):
+        self.controller.detection["dayConfirmSeconds"] = 0.01
+
+        self.assertEqual(self.observe(0), [])
+        self.assertEqual(self.observe(0.1), [])
+        self.assertEqual(kinds(self.observe(0.2)), ["recognized"])
+
+    def test_still_there_follows_warning_completion(self):
+        self.confirm()
+
+        for at in (2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6):
+            self.assertEqual(self.observe(at), [])
+            self.assertEqual(self.controller.tick(at, DAY), [])
+
+        effects = self.finish(6)
+
+        self.assertEqual(kinds(effects), ["still_there"])
+        self.assertEqual(
+            [effect.key for effect in effects if isinstance(effect, PlayKey)],
+            ["countdown_1"],
+        )
+
+    def test_configured_absence_requires_contiguous_fresh_negatives(self):
+        self.controller.detection["absenceSeconds"] = 3
+        self.controller.suppression = "until_absence"
+
+        for at in (0, 0.5, 1):
+            self.observe(at, 0)
+
+        for at in (2.5, 3, 3.5, 4, 4.5, 5):
+            self.observe(at, 0)
+            self.assertEqual(self.controller.suppression, "until_absence")
+
+        self.controller.observe(observation(self.number, 5), 5.5, DAY)
+
+        self.assertEqual(self.controller.suppression, "until_absence")
+        self.observe(5.5, 0)
+
+        self.assertEqual(self.controller.suppression, "")
+
+    def test_stale_warning_completion_cancels_and_requires_fresh_confirmation(self):
+        self.confirm()
+        effects = self.finish(4.01)
+
+        self.assertEqual(kinds(effects), ["deactivated"])
+        self.assertEqual(
+            [effect.reason for effect in effects if isinstance(effect, IncidentEvent)],
+            ["camera_unavailable"],
+        )
+        self.assertTrue(self.controller.armed)
+        self.assertEqual(self.controller.phase, "idle")
+
+        for at in (4.5, 5, 5.5, 6):
+            self.assertEqual(self.observe(at), [])
+
+        self.assertEqual(kinds(self.observe(6.5)), ["recognized"])
+
     def test_repeated_and_out_of_order_frames_never_confirm(self):
         for at in (0, 0.5, 1, 2, 3):
             self.assertEqual(self.controller.observe(observation(1, 0), at, DAY), [])

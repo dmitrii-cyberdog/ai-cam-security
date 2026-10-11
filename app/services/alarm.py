@@ -117,8 +117,7 @@ class AlarmController:
             self._last_seen is None
             or now - self._last_seen > self.detection["maxFrameAgeSeconds"]
         ):
-            self._waiting = True
-            return []
+            return self._end("camera_unavailable", now, utc_now)
 
         next_index = self._key_index + 1
 

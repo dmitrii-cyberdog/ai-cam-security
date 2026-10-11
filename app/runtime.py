@@ -244,7 +244,7 @@ class Runtime:
 
     async def _step(self) -> None:
         now, utc = time.monotonic(), datetime.now(timezone.utc)
-        await self._apply(self.controller.tick(now, utc))
+
         if (
             self._last_observation is not None
             and now - self._last_observation
@@ -268,6 +268,8 @@ class Runtime:
                 self._last_observation = message.frame.captured_at
                 self._latest_frame = message.frame
             await self._apply(self.controller.observe(message, now, utc))
+
+        await self._apply(self.controller.tick(now, utc))
 
         self._notify_camera_status(now, utc)
 

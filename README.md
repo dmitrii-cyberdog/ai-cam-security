@@ -194,6 +194,13 @@ Audio faults require a successful explicit `/arm`, even after absence or recover
 Automatic alarms are allowed whenever armed, both day and night. Night hours
 only select the confirmation time; they do not arm the service.
 
+Day/night confirmation runs before “Person recognized”. “Person is still there”
+is sent after all selected `first_warning` WAVs finish, if the latest fresh
+observation detects a person. The interval between these messages is the warning
+playback time; it does not include another confirmation or absence delay.
+`DETECTION_ABSENCE_SECONDS` requires fresh negative observations to confirm
+departure. Local environment files and process variables can override `.env`.
+
 Once confirmed, play `first_warning` and every countdown key to completion,
 even if the person leaves. The files play back-to-back, without an extra pause.
 After countdown, start the siren if a fresh observation detects a person. If the

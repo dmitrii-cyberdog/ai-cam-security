@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 from app.runtime import Runtime, check_readiness
+from app.services.alarm import AlarmController
 from app.services.models import VisionFault
 from app_tests.test_alarm import DAY, config, observation
 
@@ -411,6 +412,39 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.runtime._audio_task)
         self.assertTrue(task.cancelled())
         self.assertEqual(self.events[-1].reason, "person_left")
+
+    async def test_siren_deadline_uses_latest_observation(self):
+        for people, negative_times, phase, cycles, reasons in (
+            (0, (60, 60.5, 61, 61.5), "idle", 0, ["person_left"]),
+            (1, (59.5, 60, 60.5, 61, 61.5), "alarm", 2, []),
+        ):
+            with self.subTest(people=people):
+                controller = AlarmController(config())
+                self.runtime.controller = controller
+                self.events.clear()
+                controller.command("arm", 0, DAY)
+
+                for number, at in enumerate((0, 0.5, 1, 1.5, 2), 1):
+                    controller.observe(observation(number, at), at, DAY)
+
+                for _ in range(4):
+                    controller.audio_event(controller.generation, "finished", 2, DAY)
+
+                controller.audio_event(controller.generation, "started", 2, DAY)
+
+                for number, at in enumerate(negative_times, 6):
+                    controller.observe(observation(number, at, 0), at, DAY)
+
+                self.runtime.vision.poll.return_value = observation(
+                    6 + len(negative_times), 62, people
+                )
+
+                with patch("app.runtime.time", monotonic=Mock(return_value=62)):
+                    await self.runtime._step()
+
+                self.assertEqual(controller.phase, phase)
+                self.assertEqual(controller.status()["alarmCycles"], cycles)
+                self.assertEqual([event.reason for event in self.events], reasons)
 
     async def test_vision_restart_preserves_armed_mode(self):
         await self.confirm()
