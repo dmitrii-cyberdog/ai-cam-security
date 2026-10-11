@@ -291,7 +291,7 @@ class TelegramService:
                 pass
 
             reply = (
-                f"<b>📷 Camera photo</b>\n\nTime (UTC): {frame.captured_utc.isoformat()}"
+                f"<b>📷 Camera photo</b>\n\nTime (UTC): {frame.captured_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}"
                 if photo is not None and frame is not None
                 else "<b>⚠️ Photo unavailable</b>\n\nNo fresh camera photo could be obtained.\n<i>Use /status to check the camera.</i>"
             )
@@ -338,7 +338,7 @@ class TelegramService:
             "startup",
             time.monotonic(),
             "<b>🚀 Camera alarm service started</b>\n\n"
-            f"Started at (UTC): {self._started_at.isoformat()}\n"
+            f"Started at (UTC): {self._started_at.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
             "<b>❌ Started disarmed</b>\n\n"
             "<i>Use /status to check readiness, then /arm to enable automatic detection.</i>",
             None,

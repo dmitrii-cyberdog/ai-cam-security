@@ -22,7 +22,7 @@ def prepare_notification(event: IncidentEvent, max_frame_age: float) -> Notifica
             if event.kind == "camera_available"
             else "<b>⚠️ RTSP camera stream unavailable</b>\n\nNo fresh camera frames are reaching the service.\n<i>Check the camera and its network connection.</i>"
         )
-        text += f"\n\n🕒 Time (UTC): {event.at_utc.isoformat()}"
+        text += f"\n\n🕒 Time (UTC): {event.at_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}"
 
         return Notification(0, event.kind, event.at, text, None)
 
@@ -43,7 +43,7 @@ def prepare_notification(event: IncidentEvent, max_frame_age: float) -> Notifica
     text = (
         f"<b>{titles[event.kind]}</b>\n\n"
         f"🔔 Incident: <b>#{event.incident_id}</b>\n"
-        f"🕒 Time (UTC): {event.at_utc.isoformat()}\n"
+        f"🕒 Time (UTC): {event.at_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
         f"📍 Phase at event: {escape(event.phase[:80].capitalize())}\n"
         f"ℹ️ Reason: {escape(reason[:180])}"
     )
@@ -63,7 +63,7 @@ def prepare_notification(event: IncidentEvent, max_frame_age: float) -> Notifica
                 pass
 
             if not 0 <= event.at - event.frame.captured_at <= max_frame_age:
-                text += f"\n\n<i>📷 Latest available image (UTC): {event.frame.captured_utc.isoformat()}</i>"
+                text += f"\n\n<i>📷 Latest available image (UTC): {event.frame.captured_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}</i>"
 
         if photo is None:
             text += "\n\n<i>⚠️ Photo unavailable</i>"

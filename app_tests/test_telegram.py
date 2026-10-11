@@ -76,7 +76,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         image = cv2.imdecode(np.frombuffer(sent["photo"], dtype=np.uint8), cv2.IMREAD_COLOR)
 
         self.assertEqual(image.shape, frame.image.shape)
-        self.assertIn(frame.captured_utc.isoformat(), sent["caption"])
+        self.assertIn("Time (UTC): 2026-09-27T10:00:00Z", sent["caption"])
         self.assertEqual(sent["parse_mode"], "HTML")
         self.assertEqual(self.service.health(), "healthy")
 
@@ -392,7 +392,10 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         startup = app.bot.send_message.call_args.kwargs
 
         self.assertEqual(startup["chat_id"], 42)
-        self.assertIn(self.service._started_at.isoformat(), startup["text"])
+        self.assertIn(
+            f"Started at (UTC): {self.service._started_at.strftime('%Y-%m-%dT%H:%M:%SZ')}",
+            startup["text"],
+        )
         self.assertIn("Started disarmed", startup["text"])
         self.assertIn("<b>🚀 Camera alarm service started</b>\n\n", startup["text"])
         self.assertIn("<b>❌ Started disarmed</b>", startup["text"])

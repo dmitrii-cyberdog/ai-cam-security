@@ -34,7 +34,7 @@ class NotificationTests(unittest.TestCase):
             self.assertEqual(note.occurred_at, 100)
             self.assertIsNone(note.photo)
             self.assertIn(f"<b>{heading}</b>", note.text)
-            self.assertIn(DAY.isoformat(), note.text)
+            self.assertIn("Time (UTC): 2026-09-27T10:00:00Z", note.text)
             self.assertNotIn("Incident", note.text)
             self.assertNotIn("Photo unavailable", note.text)
 
@@ -48,7 +48,8 @@ class NotificationTests(unittest.TestCase):
     def test_stale_photo_is_labelled(self):
         note = prepare_notification(self.event("deactivated", 10), 2)
         self.assertIn("Latest available image", note.text)
-        self.assertIn(DAY.isoformat(), note.text)
+        self.assertIn("Latest available image (UTC): 2026-09-27T10:00:00Z", note.text)
+        self.assertIn("Time (UTC): 2026-09-27T10:00:10Z", note.text)
         self.assertIn("Phase at event: Warning", note.text)
         self.assertIn("Reason: Person left the camera view", note.text)
 
