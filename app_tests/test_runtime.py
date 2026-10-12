@@ -474,6 +474,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.audio.play.side_effect = play
         self.runtime.config["detection"]["onAlarmSendPhotoEveryMillisecs"] = 2000
 
+        self.runtime._last_observation = 100
+
         with patch("app.runtime.time", monotonic=Mock(return_value=100)):
             await self.runtime.execute("alarm")
             await asyncio.sleep(0)
