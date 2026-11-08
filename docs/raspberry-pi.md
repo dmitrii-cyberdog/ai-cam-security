@@ -113,9 +113,9 @@ Default playback: Czech then English for each key, then common alarm. A common
 file takes precedence over language versions. Warning/countdown files play once;
 the alarm WAV repeats throughout each siren period. Without a common file, the
 main-language file is required; missing secondary-language files are skipped. Files must resolve inside
-the sound root and have readable WAV headers. Set `AUDIO_DEVICE` to the verified
-ALSA device (for example `plughw:CARD=<actual-card>,DEV=0`); `default` is only a
-starting value. Use `aplay -l`/`aplay -L` to inspect actual devices. Verify access as
+the sound root and have readable WAV headers. Leave `AUDIO_DEVICE` empty or unset
+to use the system default ALSA device. To override it, set a verified ALSA device
+(for example `plughw:CARD=<actual-card>,DEV=0`). Use `aplay -l`/`aplay -L` to inspect actual devices. Verify access as
 the service account without relying on an interactive desktop audio session.
 
 To set device volume when arming, put an integer percentage in `.env.prod.local`:

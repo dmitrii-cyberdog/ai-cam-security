@@ -202,6 +202,35 @@ class ConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, key):
                     load_config(root=self.root)
 
+    def test_audio_device_defaults_when_missing_or_empty(self):
+        self.assertEqual(load_config(root=self.root)["audio"]["device"], "default")
+
+        for content in ("AUDIO_DEVICE=\n", "AUDIO_DEVICE\n"):
+            with self.subTest(content=content):
+                (self.root / ".env").write_text(content, encoding="utf-8")
+
+                self.assertEqual(
+                    load_config(root=self.root)["audio"]["device"], "default"
+                )
+
+    def test_audio_device_process_override(self):
+        (self.root / ".env").write_text(
+            "AUDIO_DEVICE=plughw:CARD=UACDemoV10,DEV=0\n", encoding="utf-8"
+        )
+
+        for value, expected in (
+            ("", "default"),
+            ("default", "default"),
+            ("plughw:CARD=Speaker,DEV=0", "plughw:CARD=Speaker,DEV=0"),
+        ):
+            with (
+                self.subTest(value=value),
+                patch.dict(os.environ, {"AUDIO_DEVICE": value}),
+            ):
+                self.assertEqual(
+                    load_config(root=self.root)["audio"]["device"], expected
+                )
+
     def test_audio_volume_is_optional_integer_percentage(self):
         self.assertIsNone(load_config(root=self.root)["audio"]["volume"])
 

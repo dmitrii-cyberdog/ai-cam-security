@@ -178,9 +178,11 @@ def load_config(
         or len(set(sequence)) != len(sequence)
     ):
         raise ValueError("Invalid AUDIO_SEQUENCE")
-    device = values.get("AUDIO_DEVICE", "default") or ""
-    if not device or any(char in device for char in "\r\n\x00"):
+    device = values.get("AUDIO_DEVICE") or "default"
+
+    if any(char in device for char in "\r\n\x00"):
         raise ValueError("Invalid AUDIO_DEVICE")
+
     config["audio"] = {
         "soundsFolder": asset_path("AUDIO_SOUNDS_FOLDER", "system/sounds"),
         "mainLanguage": main_language,
