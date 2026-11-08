@@ -11,7 +11,7 @@ dependencies = [
     "python-dotenv>=1.2.4,<2.0",
     "opencv-python-headless>=4.13,<5",
     "numpy>=2.2,<3",
-    "tzdata>=2025.2; sys_platform == 'win32'",
+    "tzdata>=2026.6; sys_platform == 'win32'",
     "python-telegram-bot>=22.5,<23",
 ]
 
