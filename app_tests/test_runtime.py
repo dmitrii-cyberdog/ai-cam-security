@@ -1,11 +1,12 @@
 import asyncio
 import time
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 from app.runtime import Runtime, check_readiness
-from app.services.alarm import AlarmController
+from app.services.alarm import AlarmController, PlayKey
 from app.services.models import VisionFault
 from app_tests.test_alarm import DAY, config, observation
 
@@ -29,8 +30,256 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.readiness.start()
         self.addCleanup(self.readiness.stop)
 
+        for target, value in (("app.runtime.resolve_sequence", {}), ("app.runtime.shutil.which", "available")):
+            boundary = patch(target, return_value=value)
+            boundary.start()
+            self.addCleanup(boundary.stop)
+
     async def asyncTearDown(self):
         await self.runtime._stop_audio()
+
+    async def test_playback_failure_is_logged_and_retained(self):
+        self.runtime.controller.command("alarm", 0, DAY)
+        self.runtime.audio.play.side_effect = ValueError("audio_exit_1: Device busy")
+        generation = self.runtime.controller.generation
+
+        with self.assertLogs("ai-cam-security", level="ERROR") as records:
+            await self.runtime._play(PlayKey(1, generation, "alarm", True))
+
+        self.assertEqual(len(records.records), 1)
+        self.assertEqual(records.records[0].context["generation"], generation)
+        failure = self.runtime.status()["lastAudioFailure"]
+        self.assertEqual(failure["operation"], "playback")
+        self.assertIn("Device busy", failure["reason"])
+        self.assertTrue(failure["atUtc"].endswith("Z"))
+        self.assertEqual(self.runtime.status()["audio"], "audio_fault")
+
+    async def test_stale_playback_failure_cannot_fault_current_audio(self):
+        self.runtime.controller.command("alarm", 0, DAY)
+        self.runtime.audio.play.side_effect = ValueError("old operation")
+
+        await self.runtime._play(PlayKey(1, self.runtime.controller.generation - 1, "alarm", True))
+
+        self.assertIsNone(self.runtime.status()["lastAudioFailure"])
+        self.assertEqual(self.runtime.status()["audio"], "unchecked")
+
+    async def test_volume_failure_is_logged_and_retained_after_recovery(self):
+        self.runtime.audio.set_volume.side_effect = ValueError("Audio volume command failed: PCM missing")
+
+        with self.assertLogs("ai-cam-security", level="ERROR"):
+            await self.runtime.execute("arm")
+
+        self.runtime.audio.set_volume.side_effect = None
+        await self.runtime.execute("arm")
+
+        self.assertIn("PCM missing", self.runtime.status()["lastAudioFailure"]["reason"])
+        self.assertEqual(self.runtime.status()["lastAudioFailure"]["operation"], "volume")
+
+    async def test_superseded_mixer_failure_cannot_fault_new_manual_alarm(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def volume():
+            entered.set()
+            await release.wait()
+            raise ValueError("old mixer failure")
+
+        self.runtime.audio.set_volume.side_effect = volume
+        arm = asyncio.create_task(self.runtime.execute("arm"))
+        await entered.wait()
+        await self.runtime.execute("alarm")
+        release.set()
+
+        self.assertEqual(await arm, "Command superseded")
+        self.assertIsNone(self.runtime.status()["lastAudioFailure"])
+        self.assertEqual(self.runtime.status()["audio"], "ready")
+
+    async def test_superseded_validation_failure_cannot_fault_new_alarm(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def validate():
+            entered.set()
+            release.wait(2)
+            raise ValueError("old validation failure")
+
+        self.runtime.audio.validate.side_effect = validate
+        arm = asyncio.create_task(self.runtime.execute("arm"))
+
+        try:
+            self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+            self.runtime.audio.validate.side_effect = None
+            await self.runtime.execute("alarm")
+        finally:
+            release.set()
+
+        self.assertEqual(await arm, "Command superseded")
+        self.assertIsNone(self.runtime.status()["lastAudioFailure"])
+        self.assertEqual(self.runtime.status()["audio"], "ready")
+
+    async def test_validation_failure_after_volume_refuses_arm_with_diagnostics(self):
+        self.runtime.audio.validate.side_effect = [None, ValueError("asset unreadable after mixer")]
+
+        with self.assertLogs("ai-cam-security", level="ERROR"):
+            result = await self.runtime.execute("arm")
+
+        self.assertEqual(result, "Cannot arm: asset unreadable after mixer")
+        self.assertFalse(self.runtime.status()["armed"])
+        self.assertEqual(self.runtime.status()["audio"], "unavailable")
+        self.assertEqual(self.runtime.status()["lastAudioFailure"]["operation"], "validation")
+
+    async def test_manual_alarm_readiness_never_checks_camera_or_model(self):
+        self.runtime._last_observation = None
+        self.runtime._camera_health = self.runtime._detector_health = "unavailable"
+        self.runtime.config["audio"]["volume"] = 25
+        entered = asyncio.Event()
+
+        async def play(key, **kwargs):
+            kwargs["on_started"]()
+            entered.set()
+            await asyncio.Event().wait()
+
+        self.runtime.audio.play.side_effect = play
+
+        with (
+            patch("app.runtime.check_readiness", side_effect=AssertionError("full readiness must not run")),
+            patch("app.runtime.resolve_sequence"),
+            patch("app.runtime.shutil.which", side_effect=lambda name: "aplay" if name == "aplay" else None),
+        ):
+            self.assertEqual(await self.runtime.execute("alarm"), "alarm")
+            await asyncio.wait_for(entered.wait(), 1)
+            task = self.runtime._audio_task
+
+            for reason in ("camera_unavailable", "detector_unavailable"):
+                self.runtime.vision.poll.return_value = VisionFault(reason, time.monotonic())
+                await self.runtime._step()
+
+            self.assertIs(self.runtime._audio_task, task)
+            self.assertFalse(task.done())
+            self.assertEqual([event.kind for event in self.events].count("activated"), 1)
+            self.assertTrue(self.runtime.controller.manual)
+            self.runtime.audio.set_volume.assert_not_awaited()
+
+            await self.runtime.execute("stop")
+
+        self.assertTrue(task.cancelled())
+
+    async def test_manual_alarm_rejects_missing_aplay_even_without_camera(self):
+        self.runtime._last_observation = None
+
+        with patch("app.runtime.resolve_sequence"), patch("app.runtime.shutil.which", return_value=None):
+            result = await self.runtime.execute("alarm")
+
+        self.assertIn("Cannot alarm: Audio backend unavailable: aplay", result)
+        self.runtime.audio.play.assert_not_awaited()
+
+    async def test_status_uses_monotonic_uptime_and_keeps_stale_frame_age(self):
+        self.runtime._started_at = 100
+        self.runtime._last_observation = None
+
+        with patch("app.runtime.time", monotonic=Mock(return_value=110)):
+            self.assertEqual(self.runtime.status()["system"]["uptimeSeconds"], 10)
+            self.assertIsNone(self.runtime.status()["system"]["lastFrameAgeSeconds"])
+
+            self.runtime._last_observation = 101
+            self.runtime.vision.poll.return_value = VisionFault("camera_unavailable", 110)
+            await self.runtime._step()
+
+            self.assertEqual(self.runtime.status()["system"]["lastFrameAgeSeconds"], 9)
+            self.assertEqual(self.runtime.status()["camera"], "unavailable")
+
+    async def test_slow_metrics_sample_does_not_block_stop_or_overlap(self):
+        entered, release = threading.Event(), threading.Event()
+        stop = asyncio.Event()
+        calls = []
+
+        def sample():
+            calls.append(True)
+            entered.set()
+            release.wait(3)
+
+            return {"cpuTemperatureCelsius": 55, "loadAverage": None, "memoryUsedMiB": None, "memoryTotalMiB": None}
+
+        async def background(event):
+            await event.wait()
+
+        self.runtime.telegram.run = self.runtime.notifications.run = background
+
+        with patch("app.runtime.read_system_health", side_effect=sample):
+            task = asyncio.create_task(self.runtime.run(stop))
+
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                self.assertIsNone(self.runtime.status()["system"]["cpuTemperatureCelsius"])
+                self.assertEqual(await asyncio.wait_for(self.runtime.execute("stop"), 0.5), "stop")
+                self.assertEqual(len(calls), 1)
+            finally:
+                release.set()
+                stop.set()
+                await asyncio.wait_for(task, 2)
+
+        self.assertTrue(task.done())
+
+    async def test_failed_metrics_sample_replaces_previous_values(self):
+        loop = asyncio.get_running_loop()
+        readings = (
+            {"cpuTemperatureCelsius": 55, "loadAverage": (0, 0, 0), "memoryUsedMiB": 100, "memoryTotalMiB": 1000},
+            {"cpuTemperatureCelsius": None, "loadAverage": None, "memoryUsedMiB": None, "memoryTotalMiB": None},
+        )
+
+        for reading in readings:
+            stop = asyncio.Event()
+
+            def sample():
+                loop.call_soon_threadsafe(stop.set)
+
+                return reading
+
+            with patch("app.runtime.read_system_health", side_effect=sample):
+                await asyncio.wait_for(self.runtime._sample_system_health(stop), 1)
+
+        self.assertIsNone(self.runtime.status()["system"]["cpuTemperatureCelsius"])
+        self.assertIsNone(self.runtime.status()["system"]["memoryUsedMiB"])
+        self.assertFalse(self.runtime.status()["armed"])
+
+    async def test_manual_alarm_limit_with_no_camera_and_audio_failure_stop(self):
+        async def play(key, **kwargs):
+            kwargs["on_started"]()
+            await asyncio.Event().wait()
+
+        self.runtime.audio.play.side_effect = play
+        self.runtime._last_observation = None
+
+        for ending in ("deadline", "disarm", "failed"):
+            with self.subTest(ending=ending):
+                with patch("app.runtime.time", monotonic=Mock(return_value=100)):
+                    await self.runtime.execute("alarm")
+                    await asyncio.sleep(0)
+                    await self.runtime._step()
+
+                task = self.runtime._audio_task
+
+                if ending == "deadline":
+                    with patch("app.runtime.time", monotonic=Mock(return_value=160)):
+                        await self.runtime._step()
+                elif ending == "disarm":
+                    await self.runtime.execute("disarm")
+                else:
+                    self.runtime._audio_callback(self.runtime.controller.generation, "failed")
+                    await self.runtime._step()
+
+                self.assertTrue(task.cancelled())
+                self.assertEqual(self.runtime.status()["phase"], "idle")
+
+    async def test_failure_redacts_secrets_before_summary_truncation(self):
+        self.runtime.config["telegram"]["token"] = "123:secret-token"
+        self.runtime.controller.command("alarm", 0, DAY)
+        self.runtime.audio.play.side_effect = ValueError("x" * 290 + "123%3Asecret-token <PCM>")
+
+        with self.assertLogs("ai-cam-security", level="ERROR") as records:
+            await self.runtime._play(PlayKey(1, self.runtime.controller.generation, "alarm", True))
+
+        self.assertNotIn("secret-token", records.records[0].context["reason"])
+        self.assertNotIn("123%3A", self.runtime.status()["lastAudioFailure"]["reason"])
+        self.assertLessEqual(len(self.runtime.status()["lastAudioFailure"]["reason"]), 300)
 
     async def feed(self, at, number, people=1):
         await self.runtime._apply(

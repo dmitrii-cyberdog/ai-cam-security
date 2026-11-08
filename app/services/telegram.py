@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from html import escape
 from typing import Any, Dict
+from urllib.parse import quote, unquote
 
 import cv2
 
@@ -93,7 +94,13 @@ class TelegramService:
             self.settings["token"],
             config["camera"]["rtspUrl"],
             config["camera"]["password"],
+            config["camera"]["login"],
         ]
+        self._secrets = sorted({
+            variant
+            for secret in self._secrets if secret
+            for variant in (secret, quote(secret, safe=""), unquote(secret))
+        }, key=len, reverse=True)
 
     def health(self) -> str:
         return self._health
@@ -133,6 +140,17 @@ class TelegramService:
             "audio_fault": "Audio fault — automatic alarms paused",
         }.get(status["suppressionReason"], status["suppressionReason"])
         last_command = status["lastCommandResult"] or "None yet"
+        system = status["system"]
+        temperature = system["cpuTemperatureCelsius"]
+        load = system["loadAverage"]
+        used, total = system["memoryUsedMiB"], system["memoryTotalMiB"]
+        age = system["lastFrameAgeSeconds"]
+        hours, remainder = divmod(int(system["uptimeSeconds"]), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        temperature_text = "Unavailable" if temperature is None else f"{temperature:.1f} °C"
+        load_text = "Unavailable" if load is None else " / ".join(f"{value:.2f}" for value in load)
+        memory_text = "Unavailable" if used is None or total is None else f"{used:.0f} / {total:.0f} MiB"
+        age_text = "No frames received" if age is None else f"{age:.1f} s"
 
         if last_command in COMMANDS:
             last_command = f"/{last_command} completed"
@@ -150,7 +168,15 @@ class TelegramService:
             f"Camera: {self._label(status['camera'])}\n"
             f"Detector: {self._label(status['detector'])}\n"
             f"Audio: {self._label(status['audio'])}\n"
+            f"Audio device: {self._text(status['audioDevice'])}\n"
+            f"Volume on /arm: {str(status['audioVolume']) + '%' if status['audioVolume'] is not None else 'Unchanged'}\n"
             f"Telegram: {self._label(status['telegram'])}\n\n"
+            "<b>🌡️ Host health</b>\n"
+            f"CPU temperature: {temperature_text}\n"
+            f"Service uptime: {hours}h {minutes}m {seconds}s\n"
+            f"Load average (1/5/15 min): {load_text}\n"
+            f"Host memory: {memory_text}\n"
+            f"Last frame age: {age_text}\n\n"
             "<b>🔔 Notifications</b>\n"
             f"Queued: {notifications['queued_count']}\n"
             f"Dropped: {notifications['dropped_count']}\n"
@@ -158,6 +184,15 @@ class TelegramService:
             f"Image memory: {notifications['retained_image_bytes'] / (1024 * 1024):.1f} MiB\n\n"
             f"<b>📝 Last command</b>\n{self._text(last_command)}"
         )
+
+        failure = status["lastAudioFailure"]
+
+        if failure is not None:
+            reply += (
+                "\n\n<b>🔈 Last audio failure (history)</b>\n"
+                f"{self._text(failure['atUtc'])} — {self._text(failure['operation'])}\n"
+                f"{self._text(failure['reason'], 300)}"
+            )
 
         if status["suppressionReason"] == "audio_fault":
             reply += "\n\n<i>Check the speaker, then use /arm. A successful /arm resumes automatic alarms.</i>"

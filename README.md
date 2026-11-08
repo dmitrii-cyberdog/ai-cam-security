@@ -158,6 +158,12 @@ Configured credentials and their encoded forms are redacted in final JSON output
 including tracebacks and third-party logs. Native camera diagnostics are suppressed
 inside the worker; health uses safe fault codes.
 
+Audio failures include the selected device, sound key/asset for playback, and
+the ALSA/OS reason in JSON logs. Backend stderr is drained continuously with
+only its last 4096 bytes retained. Expected failures produce one error record;
+unexpected failures include a traceback. Startup logs show effective audio
+device, volume and languages, without dumping private environment files.
+
 ## Commands and behavior
 
 Telegram commands are accepted only from configured numeric user IDs in private
@@ -179,11 +185,11 @@ explain how to resume automatic alarms with a successful `/arm`.
 
 | Command | Result |
 | --- | --- |
-| `/status` | Mode, phase, day/night profile, automatic siren periods used/allowed, component and queue health |
+| `/status` | Protection, component/queue health, CPU temperature, service uptime, load averages, host memory, last frame age, audio selection and last failure |
 | `/photo` | Wait up to 5 seconds for a frame captured after the request and send it to the requesting chat; report unavailable if no fresh frame arrives |
 | `/arm` | Check camera/detector/audio readiness; apply configured volume, clear suppression and arm |
 | `/disarm` | Disable automation and stop all playback |
-| `/alarm` | Manual siren, including while disarmed; at most 60 seconds |
+| `/alarm` | Manual siren, including while disarmed or RTSP is unavailable; needs WAV assets and aplay, leaves volume unchanged; at most 60 seconds |
 | `/stop` | Stop playback, keep armed mode, reset siren allowance and require fresh confirmation |
 | `/help` | Command summary |
 
@@ -193,6 +199,23 @@ Europe/Prague; require at least 3 frames and positive gaps no greater than
 2 seconds cancel automatic audio as unknown visibility. Worker recovery preserves
 armed mode but requires fresh confirmation; full service restart starts disarmed.
 Audio faults require a successful explicit `/arm`, even after absence or recovery.
+
+Host metrics refresh in the background every five seconds. Load averages cover
+1/5/15 minutes and are not CPU utilization percentages. Host memory is
+`MemTotal - MemAvailable`, shown alongside total usable memory in MiB. CPU
+temperature uses a CPU thermal zone in Linux sysfs; memory uses `/proc/meminfo`.
+Individual unsupported, unreadable or invalid metrics display `Unavailable`
+without affecting protection or bot commands. Service uptime uses a monotonic
+clock; last frame age remains visible after camera loss. No frame ever received
+is shown explicitly. The kernel documents the [thermal-zone units](https://kernel.org/doc/html/v5.7/driver-api/thermal/sysfs-api.html)
+and [memory fields](https://www.kernel.org/doc/html/latest/filesystems/proc.html).
+
+Status shows the effective audio device, the configured volume applied only on
+`/arm`, and the latest audio failure with its UTC timestamp. That failure is
+history retained until another failure or restart, even after recovery. A ready
+asset/backend check does not prove the speaker can play. Manual alarms do not
+require camera/model/detector readiness or `amixer`; camera faults leave an
+active manual siren running, while automatic alarms still stop on vision faults.
 
 Automatic alarms are allowed whenever armed, both day and night. Night hours
 only select the confirmation time; they do not arm the service.

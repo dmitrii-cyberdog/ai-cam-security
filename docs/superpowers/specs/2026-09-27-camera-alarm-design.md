@@ -4,6 +4,24 @@ Status: approved by the user on 2026-09-27 for implementation planning.
 This approval does not authorize deployment. Values labelled proposed are
 accepted initial defaults to verify and tune on the real camera.
 
+## Diagnostics amendment (2026-11-08)
+
+The user approved the [status/audio diagnostics plan](../plans/2026-11-08-telegram-status-audio-diagnostics.md)
+for implementation. Telegram status adds CPU temperature, monotonic service
+uptime, 1/5/15-minute load averages, host memory, last frame age, effective audio
+device/volume policy and historical last audio failure with UTC timestamp.
+Optional metrics refresh every five seconds outside the control loop; missing
+metrics display unavailable independently and do not affect alarm state.
+
+ALSA subprocess stderr is drained continuously, retaining its last 4096 bytes;
+errors include backend/device/operation context in the existing redacted JSON
+logs. Status retains a concise last failure until another failure or restart.
+Manual sirens require configured WAV assets and aplay, independent of camera,
+model, detector or amixer. Manual volume remains unchanged. Automatic readiness,
+freshness requirements, suppression/recovery, and alarm timing remain as before.
+Hardware routing, physical sound and Pi metrics still need supervised acceptance;
+this amendment does not authorize deployment or live sound tests.
+
 ## Goal and confirmed requirements
 
 Run a local person-detection and audio alarm service on a Raspberry Pi 5 with

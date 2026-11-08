@@ -1,10 +1,11 @@
 import asyncio
 import re
-import subprocess
 import wave
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Dict
+
+from app.services.logger import logger
 
 #
 #
@@ -44,12 +45,56 @@ def resolve_sequence(config: Dict[str, Any]) -> dict[str, tuple[Path, ...]]:
 #
 
 
+async def _drain_stderr(stream: asyncio.StreamReader | None, tail: bytearray) -> None:
+    if stream is None:
+        return
+
+    while chunk := await stream.read(4096):
+        tail.extend(chunk)
+        del tail[:-4096]
+
+
+async def _terminate(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        pass
+
+    try:
+        await asyncio.wait_for(process.wait(), 0.5)
+    except asyncio.TimeoutError:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+
+        await asyncio.wait_for(process.wait(), 0.4)
+
+
+async def _finish_stderr(task: asyncio.Task[None] | None) -> None:
+    if task is None:
+        return
+
+    try:
+        await asyncio.wait_for(task, 0.5)
+    except asyncio.TimeoutError:
+        pass
+
+
+#
+#
+
+
 class AudioPlayer:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         self._assets: dict[str, tuple[Path, ...]] | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._playing = False
+        self._stderr_task: asyncio.Task[None] | None = None
         self._cancel = asyncio.Event()
         self._stop_lock = asyncio.Lock()
 
@@ -73,68 +118,143 @@ class AudioPlayer:
 
             mixer.extend(["-c", card.group(1)])
 
-        try:
-            await asyncio.to_thread(
-                subprocess.run,
-                [*mixer, "-q", "sset", "PCM", "playback", f"{volume}%"],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-            )
-        except FileNotFoundError:
-            raise ValueError("Audio volume backend unavailable: amixer") from None
-        except subprocess.TimeoutExpired:
-            raise ValueError("Audio volume command timed out") from None
-        except (OSError, subprocess.CalledProcessError):
-            raise ValueError("Audio volume command failed") from None
+        tail = bytearray()
+        process = None
+        drain = None
+        failure = ""
+        spawn = asyncio.create_task(asyncio.create_subprocess_exec(
+            *mixer, "-q", "sset", "PCM", "playback", f"{volume}%",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        ))
 
-    async def play(self, key: str, *, repeat: bool = False, on_started: Callable[[], None] | None = None) -> None:
+        try:
+            try:
+                process = await asyncio.shield(spawn)
+            except asyncio.CancelledError:
+                process = await spawn
+                drain = asyncio.create_task(_drain_stderr(process.stderr, tail))
+                raise
+
+            drain = asyncio.create_task(_drain_stderr(process.stderr, tail))
+            code = await asyncio.wait_for(process.wait(), 2)
+
+            if code != 0:
+                failure = f"Audio volume command failed (exit {code})"
+        except FileNotFoundError as error:
+            failure = f"Audio volume backend unavailable: amixer: {error}"
+        except asyncio.TimeoutError:
+            failure = "Audio volume command timed out"
+        except OSError as error:
+            failure = f"Audio volume command failed: {error}"
+        finally:
+            try:
+                if process is not None:
+                    await _terminate(process)
+            finally:
+                await _finish_stderr(drain)
+
+        if failure:
+            detail = tail.decode("utf-8", errors="replace").strip()
+
+            raise ValueError(f"{failure}; device={device}; PCM volume={volume}%: {detail}")
+
+    async def play(
+        self,
+        key: str,
+        *,
+        repeat: bool = False,
+        on_started: Callable[[], None] | None = None,
+    ) -> None:
         if self._playing:
             raise ValueError("audio_busy")
         if self._assets is None:
             self.validate()
+
         assert self._assets is not None
+
         self._playing = True
         self._cancel = asyncio.Event()
         reported = False
+
         try:
             while not self._cancel.is_set():
                 for path in self._assets[key]:
                     if self._cancel.is_set():
                         return
-                    spawn = asyncio.create_task(asyncio.create_subprocess_exec("aplay", "-q", "-D", self.config["audio"]["device"], str(path), stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL))
+
+                    device = self.config["audio"]["device"]
+                    asset = path.relative_to(Path(self.config["audio"]["soundsFolder"]).resolve())
+                    context = f"device={device}; key={key}; asset={asset}"
+                    tail = bytearray()
+
+                    logger.debug("Audio asset playback requested", {
+                        "device": device,
+                        "key": key,
+                        "asset": asset.as_posix(),
+                    })
+
+                    spawn = asyncio.create_task(asyncio.create_subprocess_exec(
+                        "aplay", "-q", "-D", device, str(path),
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.PIPE,
+                    ))
+
                     try:
                         self._process = await asyncio.shield(spawn)
                     except asyncio.CancelledError:
                         self._process = await spawn
+                        self._stderr_task = asyncio.create_task(_drain_stderr(self._process.stderr, tail))
                         raise
-                    except OSError:
-                        raise ValueError("audio_spawn_failed") from None
+                    except OSError as error:
+                        raise ValueError(f"audio_spawn_failed; {context}: {error}") from None
+
+                    self._stderr_task = asyncio.create_task(_drain_stderr(self._process.stderr, tail))
+
                     if self._cancel.is_set():
                         return
+
                     waiter = asyncio.create_task(self._process.wait())
+
                     try:
                         done, _ = await asyncio.wait({waiter}, timeout=0.1)
+
                         if done and waiter.result() != 0:
                             if self._cancel.is_set():
                                 return
-                            raise ValueError(f"audio_exit_{waiter.result()}")
+
+                            await _finish_stderr(self._stderr_task)
+                            detail = tail.decode("utf-8", errors="replace").strip()
+
+                            raise ValueError(f"audio_exit_{waiter.result()}; {context}: {detail}")
+
                         if not reported and not self._cancel.is_set():
                             reported = True
+
                             if on_started is not None:
                                 on_started()
+
                         code = await waiter
+
                         if self._cancel.is_set():
                             return
+
                         if code != 0:
-                            raise ValueError(f"audio_exit_{code}")
+                            await _finish_stderr(self._stderr_task)
+                            detail = tail.decode("utf-8", errors="replace").strip()
+
+                            raise ValueError(f"audio_exit_{code}; {context}: {detail}")
                     finally:
                         waiter.cancel()
                         await asyncio.gather(waiter, return_exceptions=True)
+
+                    await _finish_stderr(self._stderr_task)
+                    self._stderr_task = None
                     self._process = None
+
                 if not repeat:
                     return
+
                 await asyncio.sleep(0)
         finally:
             await self.stop()
@@ -146,17 +266,10 @@ class AudioPlayer:
             process = self._process
             if process is None:
                 return
-            if process.returncode is None:
-                try:
-                    process.terminate()
-                except ProcessLookupError:
-                    pass
-                try:
-                    await asyncio.wait_for(process.wait(), 0.5)
-                except asyncio.TimeoutError:
-                    try:
-                        process.kill()
-                    except ProcessLookupError:
-                        pass
-                    await asyncio.wait_for(process.wait(), 0.4)
-            self._process = None
+
+            try:
+                await _terminate(process)
+            finally:
+                await _finish_stderr(self._stderr_task)
+                self._stderr_task = None
+                self._process = None

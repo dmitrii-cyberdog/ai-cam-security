@@ -1,5 +1,5 @@
 import asyncio
-import subprocess
+import sys
 import tempfile
 import unittest
 import wave
@@ -33,6 +33,184 @@ class AudioTests(unittest.IsolatedAsyncioTestCase):
 
     def flattened(self):
         return [str(path.relative_to(self.root)).replace("\\", "/") for paths in resolve_sequence(self.config).values() for path in paths]
+
+    async def test_playback_failure_preserves_bounded_alsa_stderr(self):
+        spawn = asyncio.create_subprocess_exec
+        started = []
+
+        async def backend(*args, **kwargs):
+            return await spawn(
+                sys.executable, "-c",
+                "import sys; sys.stderr.buffer.write(b'x' * 200000 + b'\\xff Device or resource busy'); sys.exit(7)",
+                **kwargs,
+            )
+
+        with patch("app.services.audio.asyncio.create_subprocess_exec", side_effect=backend):
+            with self.assertRaises(ValueError) as failure:
+                await asyncio.wait_for(AudioPlayer(self.config).play("alarm", on_started=lambda: started.append(True)), 3)
+
+        reason = str(failure.exception)
+        self.assertIn("audio_exit_7", reason)
+        self.assertIn("Device or resource busy", reason)
+        self.assertIn("default", reason)
+        self.assertIn("common/alarm.wav", reason)
+        self.assertLess(len(reason), 4400)
+        self.assertEqual(started, [])
+
+    async def test_spawn_failure_preserves_os_reason(self):
+        with patch("app.services.audio.asyncio.create_subprocess_exec", side_effect=PermissionError("speaker access denied")):
+            with self.assertRaisesRegex(ValueError, "audio_spawn_failed.*speaker access denied"):
+                await AudioPlayer(self.config).play("alarm")
+
+    async def test_mixer_stderr_reports_missing_pcm(self):
+        self.settings["volume"] = 25
+        spawn = asyncio.create_subprocess_exec
+
+        async def backend(*args, **kwargs):
+            return await spawn(sys.executable, "-c", "import sys; sys.stderr.write('Unable to find simple control PCM'); sys.exit(1)", **kwargs)
+
+        with patch("app.services.audio.asyncio.create_subprocess_exec", side_effect=backend):
+            with self.assertRaisesRegex(ValueError, "Audio volume command failed.*PCM"):
+                await AudioPlayer(self.config).set_volume()
+
+    async def test_stop_drains_verbose_playback_without_failure(self):
+        spawn = asyncio.create_subprocess_exec
+        started = asyncio.Event()
+        processes = []
+
+        async def backend(*args, **kwargs):
+            process = await spawn(sys.executable, "-c", "import os;\nwhile True: os.write(2, b'x' * 8192)", **kwargs)
+            processes.append(process)
+
+            return process
+
+        player = AudioPlayer(self.config)
+
+        with patch("app.services.audio.asyncio.create_subprocess_exec", side_effect=backend):
+            task = asyncio.create_task(player.play("alarm", repeat=True, on_started=started.set))
+
+            try:
+                await asyncio.wait_for(started.wait(), 3)
+                await asyncio.wait_for(player.stop(), 2)
+                await asyncio.wait_for(task, 2)
+            finally:
+                await player.stop()
+                await asyncio.gather(task, return_exceptions=True)
+
+        self.assertIsNotNone(processes[0].returncode)
+
+    async def test_cancellation_during_spawn_reaps_child_and_drains_stderr(self):
+        self.settings["volume"] = 25
+        spawn = asyncio.create_subprocess_exec
+
+        for operation in ("volume", "playback"):
+            with self.subTest(operation=operation):
+                entered, release = asyncio.Event(), asyncio.Event()
+                processes = []
+                player = AudioPlayer(self.config)
+
+                async def backend(*args, **kwargs):
+                    process = await spawn(sys.executable, "-c", "import os, time; os.write(2, b'x' * 200000); time.sleep(10)", **kwargs)
+                    processes.append(process)
+                    entered.set()
+                    await release.wait()
+
+                    return process
+
+                with patch("app.services.audio.asyncio.create_subprocess_exec", side_effect=backend):
+                    task = asyncio.create_task(player.set_volume() if operation == "volume" else player.play("alarm"))
+
+                    try:
+                        await asyncio.wait_for(entered.wait(), 1)
+                        await asyncio.sleep(0.05)
+                        task.cancel()
+                        release.set()
+
+                        with self.assertRaises(asyncio.CancelledError):
+                            await asyncio.wait_for(task, 3)
+
+                        self.assertIsNotNone(processes[0].returncode)
+                        self.assertTrue(processes[0].stderr.at_eof())
+                    finally:
+                        release.set()
+
+                        for process in processes:
+                            if process.returncode is None:
+                                process.kill()
+
+                            await process.stderr.read()
+                            await process.wait()
+
+                        await asyncio.gather(task, return_exceptions=True)
+
+    async def test_mixer_timeout_terminates_child_and_reports_reason(self):
+        self.settings["volume"] = 25
+        spawn = asyncio.create_subprocess_exec
+        processes = []
+
+        async def backend(*args, **kwargs):
+            process = await spawn(sys.executable, "-c", "import sys, time; sys.stderr.write('mixer stalled'); sys.stderr.flush(); time.sleep(10)", **kwargs)
+            processes.append(process)
+
+            return process
+
+        with patch("app.services.audio.asyncio.create_subprocess_exec", side_effect=backend):
+            with self.assertRaisesRegex(ValueError, "timed out.*mixer stalled"):
+                await asyncio.wait_for(AudioPlayer(self.config).set_volume(), 4)
+
+        self.assertIsNotNone(processes[0].returncode)
+
+    async def test_delayed_playback_failure_keeps_reason_after_started(self):
+        spawn = asyncio.create_subprocess_exec
+        started = []
+
+        async def backend(*args, **kwargs):
+            return await spawn(sys.executable, "-c", "import sys, time; time.sleep(0.2); sys.stderr.write('speaker disconnected'); sys.exit(2)", **kwargs)
+
+        with patch("app.services.audio.asyncio.create_subprocess_exec", side_effect=backend):
+            with self.assertRaisesRegex(ValueError, "audio_exit_2.*speaker disconnected"):
+                await AudioPlayer(self.config).play("alarm", on_started=lambda: started.append(True))
+
+        self.assertEqual(started, [True])
+
+    async def test_stop_kills_unresponsive_child_and_joins_drain(self):
+        done, started = asyncio.Event(), asyncio.Event()
+        stream = asyncio.StreamReader()
+        stream.feed_data(b"backend busy")
+
+        class Process:
+            returncode = None
+            stderr = stream
+
+            async def wait(self):
+                await done.wait()
+
+                return self.returncode
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                self.returncode = -9
+                stream.feed_eof()
+                done.set()
+
+        process = Process()
+        player = AudioPlayer(self.config)
+
+        with patch("app.services.audio.asyncio.create_subprocess_exec", return_value=process):
+            task = asyncio.create_task(player.play("alarm", repeat=True, on_started=started.set))
+
+            try:
+                await asyncio.wait_for(started.wait(), 1)
+                await asyncio.wait_for(player.stop(), 2)
+                await asyncio.wait_for(task, 1)
+            finally:
+                process.kill()
+                await asyncio.gather(task, return_exceptions=True)
+
+        self.assertEqual(process.returncode, -9)
+        self.assertTrue(stream.at_eof())
 
     def test_common_once_language_order(self):
         self.assertEqual(self.flattened(), ["cz/first_warning.wav", "en/first_warning.wav", "cz/countdown_1.wav", "en/countdown_1.wav", "cz/countdown_2.wav", "en/countdown_2.wav", "cz/countdown_3.wav", "en/countdown_3.wav", "common/alarm.wav"])
@@ -78,59 +256,54 @@ class AudioTests(unittest.IsolatedAsyncioTestCase):
             resolve_sequence(self.config)
 
     async def test_unconfigured_volume_does_not_run_mixer(self):
-        with patch("app.services.audio.subprocess.run") as run:
+        with patch("app.services.audio.asyncio.create_subprocess_exec") as spawn:
             await AudioPlayer(self.config).set_volume()
 
-        run.assert_not_called()
+        spawn.assert_not_called()
 
     async def test_volume_targets_selected_card_pcm_control(self):
         self.settings["device"] = "plughw:CARD=UACDemoV10,DEV=0"
         self.settings["volume"] = 75
+        process = Mock(returncode=0, stderr=None, wait=AsyncMock(return_value=0))
 
-        with patch("app.services.audio.subprocess.run") as run:
+        with patch("app.services.audio.asyncio.create_subprocess_exec", return_value=process) as spawn:
             await AudioPlayer(self.config).set_volume()
 
-        run.assert_called_once_with(
-            ["amixer", "-c", "UACDemoV10", "-q", "sset", "PCM", "playback", "75%"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=2,
-        )
+        self.assertEqual(spawn.call_args.args, ("amixer", "-c", "UACDemoV10", "-q", "sset", "PCM", "playback", "75%"))
 
     async def test_default_mixer_supports_zero_volume(self):
         self.settings["volume"] = 0
+        process = Mock(returncode=0, stderr=None, wait=AsyncMock(return_value=0))
 
-        with patch("app.services.audio.subprocess.run") as run:
+        with patch("app.services.audio.asyncio.create_subprocess_exec", return_value=process) as spawn:
             await AudioPlayer(self.config).set_volume()
 
-        self.assertEqual(run.call_args.args[0], ["amixer", "-q", "sset", "PCM", "playback", "0%"])
+        self.assertEqual(spawn.call_args.args, ("amixer", "-q", "sset", "PCM", "playback", "0%"))
 
     async def test_volume_rejects_device_without_card_identity(self):
         self.settings["volume"] = 75
         self.settings["device"] = "custom-output"
 
-        with patch("app.services.audio.subprocess.run") as run:
+        with patch("app.services.audio.asyncio.create_subprocess_exec") as spawn:
             with self.assertRaisesRegex(ValueError, "AUDIO_DEVICE"):
                 await AudioPlayer(self.config).set_volume()
 
-        run.assert_not_called()
+        spawn.assert_not_called()
 
     async def test_mixer_failures_are_reported(self):
         self.settings["volume"] = 75
 
         for error, message in (
-            (FileNotFoundError(), "backend unavailable"),
-            (PermissionError(), "command failed"),
-            (subprocess.CalledProcessError(1, ["amixer"]), "command failed"),
-            (subprocess.TimeoutExpired(["amixer"], 2), "timed out"),
+            (FileNotFoundError("amixer missing"), "backend unavailable.*amixer missing"),
+            (PermissionError("access denied"), "command failed.*access denied"),
         ):
-            with self.subTest(error=error), patch("app.services.audio.subprocess.run", side_effect=error):
+            with self.subTest(error=error), patch("app.services.audio.asyncio.create_subprocess_exec", side_effect=error):
                 with self.assertRaisesRegex(ValueError, message):
                     await AudioPlayer(self.config).set_volume()
 
     async def test_immediate_failure_never_reports_started(self):
         process = AsyncMock()
+        process.stderr = None
         process.returncode = 1
         process.wait.return_value = 1
         calls = []
@@ -140,10 +313,10 @@ class AudioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [])
 
     async def test_short_alarm_file_repeats_until_stopped(self):
-        finished = Mock(returncode=0, wait=AsyncMock(return_value=0))
+        finished = Mock(returncode=0, stderr=None, wait=AsyncMock(return_value=0))
         playing = asyncio.Event()
         stopped = asyncio.Event()
-        active = Mock(returncode=None, wait=AsyncMock())
+        active = Mock(returncode=None, stderr=None, wait=AsyncMock())
 
         async def wait():
             playing.set()
@@ -176,6 +349,7 @@ class AudioTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_prevents_following_files_and_repeats(self):
         class Process:
+            stderr = None
             returncode = None
             def __init__(self):
                 self.done = asyncio.Event()

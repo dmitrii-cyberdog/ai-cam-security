@@ -28,9 +28,45 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
             "camera": "healthy", "detector": "healthy", "audio": "ready", "telegram": "healthy",
             "notifications": {"queued_count": 1, "retained_image_bytes": 1048576, "dropped_count": 2, "unreported_drops": 1},
             "token": "123:secret-token",
+            "audioDevice": "default", "audioVolume": None, "lastAudioFailure": None,
+            "system": {"cpuTemperatureCelsius": None, "loadAverage": None, "memoryUsedMiB": None, "memoryTotalMiB": None, "uptimeSeconds": 0, "lastFrameAgeSeconds": None},
         }
         self.service = TelegramService(self.config, self.execute, lambda: self.status, self.get_frame)
         self.service._cutoff = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    async def test_status_shows_audio_selection_and_redacted_failure_history(self):
+        self.status.update(audioDevice="plughw:CARD=Speaker,DEV=0", audioVolume=25)
+        self.status["lastAudioFailure"] = {
+            "operation": "playback", "atUtc": "2026-11-08T20:00:00Z",
+            "reason": "<PCM> & 123%3Asecret-token " + "x" * 1000,
+        }
+        reply = self.service._status_reply()
+
+        self.assertIn("plughw:CARD=Speaker,DEV=0", reply)
+        self.assertIn("25%", reply)
+        self.assertIn("Last audio failure", reply)
+        self.assertIn("2026-11-08T20:00:00Z", reply)
+        self.assertIn("&lt;PCM&gt; &amp;", reply)
+        self.assertNotIn("secret-token", reply)
+        self.assertNotIn("x" * 301, reply)
+
+        self.status["audioVolume"] = None
+
+        self.assertIn("Unchanged", self.service._status_reply())
+
+    async def test_status_formats_host_metrics_with_units_and_zero_values(self):
+        self.status["system"].update(cpuTemperatureCelsius=57.321, loadAverage=(0, 0.5, 1.5), memoryUsedMiB=0, memoryTotalMiB=4000, uptimeSeconds=3661, lastFrameAgeSeconds=0)
+        reply = self.service._status_reply()
+
+        for value in ("57.3 °C", "1/5/15 min", "0.00 / 0.50 / 1.50", "0 / 4000 MiB", "1h 1m 1s", "0.0 s"):
+            self.assertIn(value, reply)
+
+        self.status["system"].update(cpuTemperatureCelsius=None, memoryUsedMiB=None, memoryTotalMiB=None, lastFrameAgeSeconds=None)
+        reply = self.service._status_reply()
+
+        self.assertIn("CPU temperature: Unavailable", reply)
+        self.assertIn("Host memory: Unavailable", reply)
+        self.assertIn("No frames received", reply)
 
     def update(self, **overrides):
         message = SimpleNamespace(date=datetime.now(timezone.utc), text="/disarm", reply_text=AsyncMock(), reply_photo=AsyncMock())

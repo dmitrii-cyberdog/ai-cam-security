@@ -10,6 +10,16 @@
 
 **Spec:** [Approved camera alarm design](../specs/2026-09-27-camera-alarm-design.md). Read both documents before implementation.
 
+## Diagnostics amendment (2026-11-08)
+
+The [status/audio diagnostics plan](2026-11-08-telegram-status-audio-diagnostics.md)
+adds bounded ALSA error reporting, Telegram host metrics and last-failure history,
+and explicit audio-only manual readiness. Manual sirens do not require RTSP,
+model, detector or amixer and leave volume unchanged; automatic alarms retain
+full readiness and vision-fault stops. The design and deployment guide describe
+these additions. Historical test results below remain records of their original
+runs; new verification and pending Pi acceptance belong to the diagnostics plan.
+
 ## Implementation status (2026-09-28)
 
 Software implementation and the independent review fix pass are complete in the

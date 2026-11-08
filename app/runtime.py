@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
+from urllib.parse import quote, unquote
 
 import cv2
 
@@ -13,6 +14,7 @@ from app.services.audio import AudioPlayer, resolve_sequence
 from app.services.logger import logger
 from app.services.models import Frame, IncidentEvent, Observation, VisionFault
 from app.services.notifications import NotificationWorker
+from app.services.system_health import read_system_health
 from app.services.telegram import TelegramService
 from app.services.vision import VisionWorker
 
@@ -23,6 +25,27 @@ MODEL_HASHES = {
     "4b82da9944b88577175ee23a459dce2e26e6e4be573def65b1055dc2d9720186",
     "8dd32b85f2d273e9047f1d6b59e0b2fd008b1076338107bb547ac28942cdf90b",
 }
+
+
+def check_audio_readiness(config: Dict[str, Any], *, require_volume: bool) -> list[str]:
+    errors = []
+
+    try:
+        resolve_sequence(config)
+    except ValueError as error:
+        errors.append(str(error))
+
+    if shutil.which("aplay") is None:
+        errors.append("Audio backend unavailable: aplay")
+
+    if (
+        require_volume
+        and config["audio"]["volume"] is not None
+        and shutil.which("amixer") is None
+    ):
+        errors.append("Volume backend unavailable: amixer")
+
+    return errors
 
 
 def check_readiness(config: Dict[str, Any]) -> list[str]:
@@ -47,14 +70,7 @@ def check_readiness(config: Dict[str, Any]) -> list[str]:
             )
     except OSError:
         errors.append("Missing or unreadable DETECTION_MODEL_PATH")
-    try:
-        resolve_sequence(config)
-    except ValueError as error:
-        errors.append(str(error))
-    if shutil.which("aplay") is None:
-        errors.append("Audio backend unavailable: aplay")
-    if config["audio"]["volume"] is not None and shutil.which("amixer") is None:
-        errors.append("Volume backend unavailable: amixer")
+    errors.extend(check_audio_readiness(config, require_volume=True))
 
     if not cv2.videoio_registry.hasBackend(cv2.CAP_FFMPEG):
         errors.append("Camera backend unavailable: FFmpeg")
@@ -82,10 +98,19 @@ class Runtime:
         self._camera_health = "unavailable"
         self._detector_health = "unavailable"
         self._audio_health = "unchecked"
+        self._last_audio_failure: Dict[str, Any] | None = None
         self._last_observation: float | None = None
+        self._last_frame_at: float | None = None
         self._latest_frame: Frame | None = None
         self._stream_available: bool | None = None
         self._camera_check_started_at = time.monotonic()
+        self._started_at = self._camera_check_started_at
+        self._system_health: Dict[str, Any] = {
+            "cpuTemperatureCelsius": None,
+            "loadAverage": None,
+            "memoryUsedMiB": None,
+            "memoryTotalMiB": None,
+        }
         self._closing = False
 
     async def get_frame(self) -> Frame | None:
@@ -108,16 +133,13 @@ class Runtime:
         return None
 
     async def _readiness(self, name: str) -> str | None:
-        errors = await asyncio.to_thread(check_readiness, self.config)
-        errors = [error for error in errors if "TELEGRAM_" not in error]
-
         if name == "alarm":
-            errors = [
-                error
-                for error in errors
-                if "audio" in error.lower() or "aplay" in error
-            ]
-        elif (
+            errors = await asyncio.to_thread(check_audio_readiness, self.config, require_volume=False)
+        else:
+            errors = await asyncio.to_thread(check_readiness, self.config)
+            errors = [error for error in errors if "TELEGRAM_" not in error]
+
+        if name != "alarm" and (
             self._last_observation is None
             or time.monotonic() - self._last_observation
             > self.config["detection"]["maxFrameAgeSeconds"]
@@ -125,15 +147,13 @@ class Runtime:
             or self._detector_health != "healthy"
         ):
             errors.append("Camera/detector needs fresh observations")
-        if errors:
-            return "; ".join(errors)
-        try:
-            await asyncio.to_thread(self.audio.validate)
-        except ValueError as error:
-            self._audio_health = "unavailable"
-            return str(error)
 
-        self._audio_health = "ready"
+        if errors:
+            logger.warning("Command readiness rejected", {"command": name, "errors": errors})
+
+            return "; ".join(errors)
+
+        await asyncio.to_thread(self.audio.validate)
 
         return None
 
@@ -144,23 +164,49 @@ class Runtime:
         if self._closing:
             return "Service stopping"
 
-        readiness = await self._readiness(name) if name in {"arm", "alarm"} else None
+        readiness = None
+
+        if name in {"arm", "alarm"}:
+            try:
+                readiness = await self._readiness(name)
+            except ValueError as error:
+                if serial != self._command_serial or self._closing:
+                    return "Command superseded"
+
+                self._audio_health = "unavailable"
+                self._record_audio_failure("validation", error)
+                readiness = str(error)
 
         if serial != self._command_serial or self._closing:
             return "Command superseded"
+
+        if name in {"arm", "alarm"} and readiness is None:
+            self._audio_health = "ready"
 
         if name == "arm" and readiness is None:
             try:
                 await self.audio.set_volume()
             except ValueError as error:
+                if serial != self._command_serial or self._closing:
+                    return "Command superseded"
+
                 self._audio_health = "audio_fault"
+                self._record_audio_failure("volume", error)
                 readiness = str(error)
 
             if serial != self._command_serial or self._closing:
                 return "Command superseded"
 
             if readiness is None:
-                readiness = await self._readiness(name)
+                try:
+                    readiness = await self._readiness(name)
+                except ValueError as error:
+                    if serial != self._command_serial or self._closing:
+                        return "Command superseded"
+
+                    self._audio_health = "unavailable"
+                    self._record_audio_failure("validation", error)
+                    readiness = str(error)
 
             if serial != self._command_serial or self._closing:
                 return "Command superseded"
@@ -169,7 +215,44 @@ class Runtime:
             name, time.monotonic(), datetime.now(timezone.utc), readiness
         )
         await self._apply(effects)
+
+        logger.info("Alarm command completed", {
+            "command": name,
+            "result": self.controller.last_command_result,
+        })
+
         return str(self.controller.status()["lastCommandResult"])
+
+    def _record_audio_failure(self, operation: str, error: Exception, **context: Any) -> None:
+        reason = str(error)
+        secrets = [self.config["camera"][key] for key in ("rtspUrl", "login", "password")]
+        secrets.append(self.config["telegram"]["token"])
+        variants = {
+            variant
+            for secret in secrets
+            if secret
+            for variant in (secret, quote(secret, safe=""), unquote(secret))
+        }
+
+        for secret in sorted(variants, key=len, reverse=True):
+            reason = reason.replace(secret, "[REDACTED]")
+
+        self._last_audio_failure = {
+            "operation": operation,
+            "reason": reason[:300],
+            "atUtc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        details = {
+            "operation": operation,
+            "device": self.config["audio"]["device"],
+            "reason": reason,
+            **context,
+        }
+
+        if isinstance(error, (ValueError, OSError)):
+            logger.error("Audio operation failed", details)
+        else:
+            logger.exception("Audio operation failed", details)
 
     async def _stop_audio(self) -> None:
         task = self._audio_task
@@ -183,6 +266,9 @@ class Runtime:
 
     def _audio_callback(self, generation: int, event: str) -> None:
         if generation == self.controller.generation and not self._closing:
+            if event == "started":
+                logger.info("Audio playback started", {"generation": generation, "incident": self.controller.incident_id})
+
             self._audio_events.put_nowait((generation, event))
 
     async def _play(self, effect: PlayKey) -> None:
@@ -194,11 +280,20 @@ class Runtime:
             )
         except asyncio.CancelledError:
             raise
-        except Exception:
-            self._audio_health = "audio_fault"
-            self._audio_callback(effect.generation, "failed")
+        except Exception as error:
+            if effect.generation == self.controller.generation and not self._closing:
+                self._audio_health = "audio_fault"
+                self._record_audio_failure(
+                    "playback", error,
+                    generation=effect.generation,
+                    incident=effect.incident_id,
+                    key=effect.key,
+                )
+                self._audio_callback(effect.generation, "failed")
         else:
             self._audio_callback(effect.generation, "finished")
+        finally:
+            logger.info("Audio playback stopped", {"generation": effect.generation, "incident": effect.incident_id, "key": effect.key})
 
     async def _apply(self, effects: list[AlarmEffect]) -> None:
         if any(isinstance(effect, (StopPlayback, PlayKey)) for effect in effects):
@@ -245,6 +340,9 @@ class Runtime:
     async def _step(self) -> None:
         now, utc = time.monotonic(), datetime.now(timezone.utc)
 
+        if self._last_observation is not None:
+            self._last_frame_at = self._last_observation
+
         if (
             self._last_observation is not None
             and now - self._last_observation
@@ -266,6 +364,7 @@ class Runtime:
             ):
                 self._camera_health = self._detector_health = "healthy"
                 self._last_observation = message.frame.captured_at
+                self._last_frame_at = message.frame.captured_at
                 self._latest_frame = message.frame
             await self._apply(self.controller.observe(message, now, utc))
 
@@ -278,19 +377,41 @@ class Runtime:
             await self._apply(self.controller.audio_event(generation, event, now, utc))
 
     def status(self) -> Dict[str, Any]:
+        now = time.monotonic()
+        last_frame = self._last_observation if self._last_observation is not None else self._last_frame_at
+
         return {
             **self.controller.status(),
             "camera": self._camera_health,
             "detector": self._detector_health,
             "audio": self._audio_health,
+            "audioDevice": self.config["audio"]["device"],
+            "audioVolume": self.config["audio"]["volume"],
+            "lastAudioFailure": self._last_audio_failure,
+            "system": {
+                **self._system_health,
+                "uptimeSeconds": max(0, now - self._started_at),
+                "lastFrameAgeSeconds": None if last_frame is None else max(0, now - last_frame),
+            },
             "telegram": self.telegram.health(),
             "notifications": self.notifications.health(),
         }
 
+    async def _sample_system_health(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            self._system_health = await asyncio.to_thread(read_system_health)
+
+            try:
+                await asyncio.wait_for(stop.wait(), 5)
+            except asyncio.TimeoutError:
+                pass
+
     async def run(self, stop: asyncio.Event) -> None:
         telegram_stop, notification_stop = asyncio.Event(), asyncio.Event()
-        telegram_task = notification_task = None
+        system_stop = asyncio.Event()
+        telegram_task = notification_task = system_task = None
         try:
+            system_task = asyncio.create_task(self._sample_system_health(system_stop))
             if (
                 self.config["camera"]["rtspUrl"]
                 and Path(self.config["detection"]["modelPath"]).is_file()
@@ -301,6 +422,12 @@ class Runtime:
                 self.notifications.run(notification_stop)
             )
             logger.info("Camera alarm service ready for diagnostics; started disarmed")
+            logger.info("Audio configuration", {
+                "device": self.config["audio"]["device"],
+                "volume": self.config["audio"]["volume"],
+                "main_language": self.config["audio"]["mainLanguage"],
+                "languages": self.config["audio"]["languages"],
+            })
             while not stop.is_set():
                 await self._step()
                 try:
@@ -309,6 +436,12 @@ class Runtime:
                     pass
         finally:
             self._closing = True
+            system_stop.set()
+
+            if system_task is not None:
+                system_task.cancel()
+                await asyncio.gather(system_task, return_exceptions=True)
+
             self._command_serial += 1
             effects = self.controller.command(
                 "disarm", time.monotonic(), datetime.now(timezone.utc)

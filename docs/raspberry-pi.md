@@ -137,6 +137,55 @@ Restart after configuration changes. A missing mixer control, permission error o
 volume-command failure rejects the arm attempt and preserves suppression.
 Manual `/alarm` does not apply `AUDIO_VOLUME`.
 
+### Diagnosing audio failures
+
+Use `/status` to see the effective audio device, volume policy and last failure
+timestamp/reason. Inspect JSON startup configuration and failure records:
+
+```sh
+sudo journalctl -u ai-cam-security -n 100 --no-pager
+id ai-cam-security
+sudo -u ai-cam-security aplay -l
+sudo -u ai-cam-security aplay -L
+sudo -u ai-cam-security amixer scontrols
+systemctl cat ai-cam-security
+```
+
+These commands inspect configuration/devices without playing sound. Do not
+paste private environment files or credentials into troubleshooting output.
+For an explicit `CARD=...` output, also inspect that card's mixer controls with
+`amixer -c <actual-card> scontrols` as the service account. A named control other
+than `PCM` is not automatically substituted by the application.
+
+Empty/unset `AUDIO_DEVICE` becomes ALSA `default`; it does not discover or switch
+to a USB speaker. Default PCM playback and the default mixer may route
+differently, especially between a desktop user and the service account. Compare
+the reported backend reason, card inventory, account/group permissions and
+systemd restrictions before choosing an explicit device. A missing `PCM`
+control rejects configured-volume `/arm`, even if playback itself would work.
+The tracked production volume is 100; local files/process variables may override
+it. Verify effective settings rather than assuming the tracked defaults apply.
+
+With approval for audible output, test a known WAV using `aplay -D default`
+as the service account, then the actual explicit device if needed. Test mixer
+selection separately. A speaker/device/configuration change or service restart
+needs approval; no automatic fallback device is chosen. Offline checks cannot
+verify device opening, physical sound, routing, or volume.
+
+Manual `/alarm` can start without camera credentials, fresh RTSP frames or a
+model, provided the configured WAV sequence and `aplay` are available. Missing
+`amixer` does not block it. With approval, test an unreachable camera in a test
+configuration: `/alarm` must play, `/stop` must stop, and `/arm` must refuse until
+fresh observations return. A camera failure during a manual siren must leave it
+running to its single-period limit; automatic playback must still stop on vision
+faults. No incident photo is required for manual sound.
+
+`/status` also reports CPU temperature, service uptime, load averages, host memory
+and last frame age. Compare temperature to the CPU thermal zone, memory to
+`/proc/meminfo`, and load to `uptime` during supervised Pi acceptance. Metrics
+refresh every five seconds; unavailable values do not block control commands.
+The last audio error is historical and remains visible after a successful retry.
+
 Automatic alarms work whenever armed, day and night. The first warning starts
 after 2 seconds of confirmed presence by day or 3 seconds at night (22:00–06:00,
 Europe/Prague). Finish all warning/countdown files even after departure, then
