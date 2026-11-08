@@ -46,13 +46,16 @@ def read_system_health() -> Dict[str, Any]:
     except OSError:
         pass
 
-    try:
-        load = os.getloadavg()
+    get_load_average = getattr(os, "getloadavg", None)
 
-        if all(math.isfinite(value) and value >= 0 for value in load):
-            health["loadAverage"] = load
-    except (AttributeError, OSError):
-        pass
+    if get_load_average is not None:
+        try:
+            load = get_load_average()
+
+            if all(math.isfinite(value) and value >= 0 for value in load):
+                health["loadAverage"] = load
+        except OSError:
+            pass
 
     try:
         memory = {}

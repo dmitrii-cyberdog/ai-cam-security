@@ -43,6 +43,25 @@ distinguishes initial configuration from the last value the service applied;
 unknown is explicit and no hardware readback is claimed. Runtime changes are not
 persisted: restart applies the configured initial value again when present.
 
+## Linux audio diagnostics amendment (2026-11-08)
+
+The [Linux audio status plan](../plans/2026-11-08-linux-audio-status.md) narrows
+live audio support to Raspberry Pi/Linux with ALSA system-wide volume. The user
+explicitly chose to honor the configured Linux default; no automatic fallback
+to another speaker or host reconfiguration occurs.
+
+`/status` contains general service/host information and audio-health summary;
+`/audio_status` performs bounded read-only ALSA inspection and shows configured
+PCM separately from mixer identity, playback hardware inventory, suitable
+controls, measured playback percentages/switches, initial/last-applied volume,
+and last failure. Inventory does not establish device-open/audible success.
+
+Mixer selection prefers an advertised playback-volume Master, then PCM, then
+a single other playback-volume control, including common volume controls.
+Capture-only and ambiguous controls are never modified. Preserve mute switches,
+protection, suppression and playback state; initial-at-startup/session volume
+semantics remain. Status queries must not mutate settings or block stop/disarm.
+
 ## Goal and confirmed requirements
 
 Run a local person-detection and audio alarm service on a Raspberry Pi 5 with

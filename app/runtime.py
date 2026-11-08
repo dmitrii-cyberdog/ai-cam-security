@@ -89,7 +89,7 @@ class Runtime:
         self.controller = AlarmController(config)
         self.audio = AudioPlayer(config)
         self.vision = VisionWorker(config)
-        self.telegram = TelegramService(config, self.execute, self.status, self.get_frame)
+        self.telegram = TelegramService(config, self.execute, self.status, self.get_frame, self.audio_status)
         self.notifications = NotificationWorker(
             self.telegram.send, config["detection"]["maxFrameAgeSeconds"]
         )
@@ -399,6 +399,19 @@ class Runtime:
                 ]
 
             await self._apply(effects)
+
+    async def audio_status(self) -> Dict[str, Any]:
+        inspection = await self.audio.inspect()
+
+        return {
+            "backend": "ALSA (aplay/amixer)",
+            "audio": self._audio_health,
+            "audioDevice": self.config["audio"]["device"],
+            "initialAudioVolume": self.config["audio"]["volume"],
+            "audioVolume": self._volume,
+            "lastAudioFailure": self._last_audio_failure,
+            **inspection,
+        }
 
     def status(self) -> Dict[str, Any]:
         now = time.monotonic()

@@ -29,6 +29,7 @@ from app.services.models import Frame, Notification
 
 COMMANDS = {
     "status": "Show service status",
+    "audio_status": "Show audio devices, mixer, volume and failures",
     "photo": "Get a current camera photo",
     "arm": "Enable automatic detection",
     "disarm": "Disable automatic detection and stop playback",
@@ -39,6 +40,7 @@ COMMANDS = {
 }
 COMMAND_TITLES = {
     "status": "📊 Service status",
+    "audio_status": "🔈 Audio status",
     "photo": "📷 Camera photo",
     "arm": "✅ Arm protection",
     "disarm": "❌ Disarm protection",
@@ -77,11 +79,13 @@ class TelegramService:
         execute: Callable[[str], Awaitable[str]],
         get_status: Callable[[], Dict[str, Any]],
         get_frame: Callable[[], Awaitable[Frame | None]],
+        get_audio_status: Callable[[], Awaitable[Dict[str, Any]]],
     ) -> None:
         self.settings = config["telegram"]
         self.execute = execute
         self.get_status = get_status
         self.get_frame = get_frame
+        self.get_audio_status = get_audio_status
         self._application: Any = None
         self._health = "unconfigured" if not self.settings["token"] else "offline"
         self._cutoff = datetime.now(timezone.utc)
@@ -114,8 +118,10 @@ class TelegramService:
             if secret:
                 text = text.replace(secret, "[REDACTED]")
 
-        if len(text) > limit:
-            text = text[:limit - 1] + "…"
+        encoded = text.encode("utf-16-le")
+
+        if len(encoded) > limit * 2:
+            text = encoded[:(limit - 1) * 2].decode("utf-16-le", errors="ignore") + "…"
 
         return escape(text)
 
@@ -170,9 +176,6 @@ class TelegramService:
             f"Camera: {self._label(status['camera'])}\n"
             f"Detector: {self._label(status['detector'])}\n"
             f"Audio: {self._label(status['audio'])}\n"
-            f"Audio device: {self._text(status['audioDevice'])}\n"
-            f"Initial volume: {str(status['initialAudioVolume']) + '%' if status['initialAudioVolume'] is not None else 'Unchanged'}\n"
-            f"Last applied volume: {str(status['audioVolume']) + '%' if status['audioVolume'] is not None else 'Unknown'}\n"
             f"Telegram: {self._label(status['telegram'])}\n\n"
             "<b>🌡️ Host health</b>\n"
             f"CPU temperature: {temperature_text}\n"
@@ -188,19 +191,46 @@ class TelegramService:
             f"<b>📝 Last command</b>\n{self._text(last_command)}"
         )
 
+        if status["suppressionReason"] == "audio_fault":
+            reply += "\n\n<i>Use /audio_status to check audio details. A successful /arm resumes automatic alarms.</i>"
+        elif status["suppression"] and status["armed"]:
+            reply += "\n\n<i>Automatic alarms resume after confirmed absence, or a successful /arm.</i>"
+
+        return reply
+
+    def _audio_status_reply(self, status: Dict[str, Any]) -> str:
+        control = status["mixerControl"] or "Unavailable"
+        percentages = " / ".join(f"{value}%" for value in status["mixerPercentages"]) or "Unavailable"
+        switches = " / ".join(status["mixerSwitches"]) or "Unavailable"
+        reply = (
+            "<b>🔈 Audio status</b>\n\n"
+            f"Health: {self._label(status['audio'])}\n"
+            f"Backend: {self._text(status['backend'])}\n"
+            f"Audio device: {self._text(status['audioDevice'])}\n"
+            "Default policy: Honor configured Linux output; no automatic switching\n"
+            f"Initial volume: {str(status['initialAudioVolume']) + '%' if status['initialAudioVolume'] is not None else 'Unchanged'}\n"
+            f"Last applied volume: {str(status['audioVolume']) + '%' if status['audioVolume'] is not None else 'Unknown'}\n\n"
+            "<b>Mixer</b>\n"
+            f"{self._text(status['mixerInfo'] or 'Unavailable', 400)}\n"
+            f"Volume control: {self._text(control)}\n"
+            f"Playback-volume controls: {self._text(', '.join(status['mixerControls']) or 'None', 300)}\n"
+            f"Measured mixer volume: {self._text(percentages)}\n"
+            f"Playback switches: {self._text(switches)}\n\n"
+            "<b>Playback hardware inventory</b>\n"
+            f"{self._text(status['playbackDevices'] or 'Unavailable', 900)}\n\n"
+            "<i>Inventory does not prove sound output. ALSA playback and mixer defaults can differ.</i>"
+        )
         failure = status["lastAudioFailure"]
 
         if failure is not None:
             reply += (
-                "\n\n<b>🔈 Last audio failure (history)</b>\n"
+                "\n\n<b>Last audio failure (history)</b>\n"
                 f"{self._text(failure['atUtc'])} — {self._text(failure['operation'])}\n"
                 f"{self._text(failure['reason'], 300)}"
             )
 
-        if status["suppressionReason"] == "audio_fault":
-            reply += "\n\n<i>Check the speaker, then use /arm. A successful /arm resumes automatic alarms.</i>"
-        elif status["suppression"] and status["armed"]:
-            reply += "\n\n<i>Automatic alarms resume after confirmed absence, or a successful /arm.</i>"
+        if status["inspectionErrors"]:
+            reply += "\n\n<b>Inspection errors</b>\n" + self._text("\n".join(status["inspectionErrors"]), 600)
 
         return reply
 
@@ -209,7 +239,9 @@ class TelegramService:
             return f"<b>🔊 Volume set to {self._text(result.split()[1])}%</b>\n\n<i>AUDIO_VOLUME applies again on restart when configured.</i>"
 
         if result != name:
-            return f"<b>⚠️ /{name} — command not completed</b>\n\n{self._text(result, 1000)}\n\n<i>Use /status to check the service.</i>"
+            target = "/audio_status" if name in {"volume", "alarm"} else "/status"
+
+            return f"<b>⚠️ /{name} — command not completed</b>\n\n{self._text(result, 1000)}\n\n<i>Use {target} to check details.</i>"
 
         if name == "stop":
             armed = self.get_status()["armed"]
@@ -311,6 +343,12 @@ class TelegramService:
             reply = HELP
         elif name == "status":
             reply = self._status_reply()
+        elif name == "audio_status":
+            try:
+                status = await asyncio.wait_for(self.get_audio_status(), 5)
+                reply = self._audio_status_reply(status)
+            except asyncio.TimeoutError:
+                reply = "<b>⚠️ Audio inspection timed out</b>\n\nUse /status to check service health."
         elif name == "photo":
             frame = None
 

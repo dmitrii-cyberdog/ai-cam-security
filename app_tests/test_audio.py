@@ -31,6 +31,140 @@ class AudioTests(unittest.IsolatedAsyncioTestCase):
                 wav(self.root / language / f"{key}.wav")
         wav(self.root / "common/alarm.wav")
 
+        self.inspection_patch = patch.object(
+            AudioPlayer, "_read_command", create=True,
+            new=AsyncMock(return_value="Simple mixer control 'PCM',0\n  Capabilities: pvolume pswitch\n  Front Left: Playback 30 [30%] [on]\n"),
+        )
+        self.inspection_patch.start()
+        self.addCleanup(self.inspection_patch.stop)
+
+    async def test_volume_selects_advertised_playback_control(self):
+        for content, expected in (
+            ("Simple mixer control 'Master',0\n  Capabilities: pvolume\nSimple mixer control 'PCM',0\n  Capabilities: pvolume\n", "Master"),
+            ("Simple mixer control 'Mic',0\n  Capabilities: cvolume\nSimple mixer control 'Digital',0\n  Capabilities: pvolume pswitch\n", "Digital"),
+            ("Simple mixer control 'PCM',0\n  Capabilities: pvolume\n", "PCM"),
+            ("Simple mixer control 'Master',0\n  Capabilities: volume switch\n  Playback channels: Mono\n  Mono: 30 [30%] [on]\n", "Master"),
+        ):
+            with self.subTest(control=expected):
+                player = AudioPlayer(self.config)
+                player._read_command = AsyncMock(return_value=content)
+                process = Mock(returncode=0, stderr=None, wait=AsyncMock(return_value=0))
+
+                with patch("app.services.audio.asyncio.create_subprocess_exec", return_value=process) as spawn:
+                    await player.set_volume(50)
+
+                self.assertEqual(spawn.call_args.args, ("amixer", "-q", "sset", expected, "playback", "50%"))
+
+    async def test_volume_rejects_capture_only_and_ambiguous_controls(self):
+        for content, message in (
+            ("Simple mixer control 'Mic',0\n  Capabilities: cvolume\n", "No playback volume control"),
+            ("Simple mixer control 'Speaker',0\n  Capabilities: pvolume\nSimple mixer control 'Headphone',0\n  Capabilities: pvolume\n", "Ambiguous playback volume controls"),
+        ):
+            with self.subTest(content=content):
+                player = AudioPlayer(self.config)
+                player._read_command = AsyncMock(return_value=content)
+
+                with patch("app.services.audio.asyncio.create_subprocess_exec", side_effect=AssertionError("Unexpected mixer write")) as spawn:
+                    with self.assertRaisesRegex(ValueError, message):
+                        await player.set_volume(50)
+
+                spawn.assert_not_called()
+
+    async def test_audio_inspection_reports_mixer_and_independent_errors(self):
+        player = AudioPlayer(self.config)
+
+        async def query(command):
+            if command == ["aplay", "-l"]:
+                raise ValueError("aplay unavailable")
+            if command[-1] == "info":
+                return "Card default 'UACDemoV10'/'UACDemoV1.0'\n"
+
+            return "Simple mixer control 'Speaker',0\n  Capabilities: pvolume pswitch\n  Front Left: Playback 55 [55%] [on]\n  Front Right: Playback 60 [60%] [off]\n"
+
+        player._read_command = query
+        report = await player.inspect()
+
+        self.assertEqual(report["mixerInfo"], "Card default 'UACDemoV10'/'UACDemoV1.0'\n")
+        self.assertEqual(report["mixerControl"], "Speaker")
+        self.assertEqual(report["mixerPercentages"], [55, 60])
+        self.assertEqual(report["mixerSwitches"], ["on", "off"])
+        self.assertIn("aplay unavailable", report["inspectionErrors"])
+
+    async def test_inspection_reads_bounded_output_and_preserves_backend_errors(self):
+        self.inspection_patch.stop()
+        player = AudioPlayer(self.config)
+
+        text = await player._read_command([sys.executable, "-c", "print('mixer contents')"])
+        self.assertEqual(text, "mixer contents\n")
+
+        with self.assertRaisesRegex(ValueError, "inspection output exceeds"):
+            await player._read_command([sys.executable, "-c", "print('x' * 200000)"])
+
+        with self.assertRaisesRegex(ValueError, "exit 3.*no mixer"):
+            await player._read_command([sys.executable, "-c", "import sys; sys.stderr.write('no mixer'); sys.exit(3)"])
+
+    async def test_audio_inspection_excludes_capture_levels_from_playback_readback(self):
+        player = AudioPlayer(self.config)
+        player._read_command = AsyncMock(return_value="Simple mixer control 'Master',0\n  Capabilities: pvolume cvolume pswitch cswitch\n  Mono: Playback 35 [35%] [on] Capture 99 [99%] [off]\n")
+
+        report = await player.inspect()
+
+        self.assertEqual(report["mixerPercentages"], [35])
+        self.assertEqual(report["mixerSwitches"], ["on"])
+
+    async def test_cancelled_inspection_reaps_child_and_drains_both_pipes(self):
+        self.inspection_patch.stop()
+        spawn = asyncio.create_subprocess_exec
+        entered = asyncio.Event()
+        processes = []
+
+        async def backend(*args, **kwargs):
+            process = await spawn(sys.executable, "-c", "import os, time; os.write(1, b'x' * 200000); os.write(2, b'y' * 200000); time.sleep(10)", **kwargs)
+            processes.append(process)
+            entered.set()
+
+            return process
+
+        with patch("app.services.audio.asyncio.create_subprocess_exec", side_effect=backend):
+            query = asyncio.create_task(AudioPlayer(self.config)._read_command(["amixer", "scontents"]))
+
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                await asyncio.sleep(0.05)
+                query.cancel()
+
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(query, 3)
+
+                self.assertIsNotNone(processes[0].returncode)
+                self.assertTrue(processes[0].stdout.at_eof())
+                self.assertTrue(processes[0].stderr.at_eof())
+            finally:
+                for process in processes:
+                    if process.returncode is None:
+                        process.kill()
+
+                    await process.communicate()
+
+                await asyncio.gather(query, return_exceptions=True)
+
+    async def test_inspection_timeout_reaps_child(self):
+        self.inspection_patch.stop()
+        spawn = asyncio.create_subprocess_exec
+        processes = []
+
+        async def backend(*args, **kwargs):
+            process = await spawn(sys.executable, "-c", "import time; time.sleep(10)", **kwargs)
+            processes.append(process)
+
+            return process
+
+        with patch("app.services.audio.asyncio.create_subprocess_exec", side_effect=backend):
+            with self.assertRaisesRegex(ValueError, "inspection timed out"):
+                await asyncio.wait_for(AudioPlayer(self.config)._read_command(["amixer", "info"]), 4)
+
+        self.assertIsNotNone(processes[0].returncode)
+
     def flattened(self):
         return [str(path.relative_to(self.root)).replace("\\", "/") for paths in resolve_sequence(self.config).values() for path in paths]
 

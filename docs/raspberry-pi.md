@@ -125,12 +125,12 @@ AUDIO_VOLUME=75
 
 Use the verified card name for your speaker. `AUDIO_VOLUME` accepts `0` to `100`;
 empty or unset leaves volume unchanged at startup. The service sets the card's
-`PCM` playback volume through `amixer` once before Telegram starts. With volume configured,
+playback volume through `amixer` once before Telegram starts. With volume configured,
 `AUDIO_DEVICE` must be `default` or contain `CARD=`. Verify that the service account
-can read the card's `PCM` mixer control:
+can inspect the card's playback mixer controls:
 
 ```sh
-sudo -u ai-cam-security amixer -c UACDemoV10 sget PCM
+sudo -u ai-cam-security amixer -c UACDemoV10 scontents
 ```
 
 Restart after configuration changes. A missing mixer control, permission error or
@@ -142,13 +142,16 @@ integers from `0` (mute) to `100`, works without RTSP and during playback, and
 does not arm/disarm, stop sound or clear suppression. The reply confirms success
 only after the mixer command succeeds. Changes are not persisted to env files;
 restart reapplies the configured initial value. `/volume` or its keyboard button
-shows usage. Status distinguishes the initial value from the last successfully
-applied percentage; unknown means the service has not set it, not a mixer readback.
+shows usage. `/audio_status` distinguishes the initial value, last successfully
+applied percentage, and measured mixer volume/switch state. An unknown last-applied
+value means the service has not set it.
 
 ### Diagnosing audio failures
 
-Use `/status` to see the effective audio device, volume policy and last failure
-timestamp/reason. Inspect JSON startup configuration and failure records:
+Use `/audio_status` to see the configured audio device, backend, playback hardware
+inventory, mixer identity/control, volume values and last failure timestamp/reason.
+`/status` retains general service/host information and an audio-health summary.
+Inspect JSON startup configuration and failure records:
 
 ```sh
 sudo journalctl -u ai-cam-security -n 100 --no-pager
@@ -162,15 +165,19 @@ systemctl cat ai-cam-security
 These commands inspect configuration/devices without playing sound. Do not
 paste private environment files or credentials into troubleshooting output.
 For an explicit `CARD=...` output, also inspect that card's mixer controls with
-`amixer -c <actual-card> scontrols` as the service account. A named control other
-than `PCM` is not automatically substituted by the application.
+`amixer -c <actual-card> scontents` as the service account. The app selects a
+playback-volume `Master`, then `PCM`, then a single other playback-volume control.
+Common volume controls are supported; capture-only controls are excluded.
+Multiple other controls are reported as ambiguous and no write is attempted.
+Mute switches are preserved. The selected mixer change is system-wide.
 
 Empty/unset `AUDIO_DEVICE` becomes ALSA `default`; it does not discover or switch
 to a USB speaker. Default PCM playback and the default mixer may route
 differently, especially between a desktop user and the service account. Compare
 the reported backend reason, card inventory, account/group permissions and
-systemd restrictions before choosing an explicit device. A missing `PCM`
-control prevents startup volume initialization and `/volume` changes, even if playback itself would work.
+systemd restrictions before choosing an explicit device. No suitable playback
+volume control prevents startup volume initialization and `/volume` changes,
+even if playback itself would work. The app never silently switches speakers.
 The tracked production volume is 100; local files/process variables may override
 it. Verify effective settings rather than assuming the tracked defaults apply.
 
@@ -193,6 +200,37 @@ and last frame age. Compare temperature to the CPU thermal zone, memory to
 `/proc/meminfo`, and load to `uptime` during supervised Pi acceptance. Metrics
 refresh every five seconds; unavailable values do not block control commands.
 The last audio error is historical and remains visible after a successful retry.
+
+### Keeping application defaults portable across Linux hosts
+
+Keep `AUDIO_DEVICE` empty to use the Linux default. Configure the intended
+default once on each host; the app does not infer which physical speaker you
+intend to use. Desktop audio-manager defaults and a headless system account's
+ALSA defaults may differ.
+
+For the reported headless Pi, the USB card is `UACDemoV10`, while cards 0/1 are
+HDMI. After reviewing existing host settings, a system-wide ALSA example in
+`/etc/asound.conf` is:
+
+```text
+pcm.!default {
+    type plug
+    slave.pcm "hw:CARD=UACDemoV10,DEV=0"
+}
+ctl.!default {
+    type hw
+    card "UACDemoV10"
+}
+```
+
+This is an example for that Pi, not a file the application creates or replaces.
+Review/merge existing audio configuration and approve host changes separately;
+other hosts use their own card names or audio-manager defaults. ALSA documents
+[system-wide and per-user defaults](https://www.alsa-project.org/wiki/Asoundrc).
+Configuring both playback and control defaults keeps these aliases pointed at
+the same card. Verify as the service account using `/audio_status`, and perform
+an audible check only with approval. ALSA error 524 remains a backend/device-open
+failure to investigate; listing a USB card does not prove it works.
 
 Automatic alarms work whenever armed, day and night. The first warning starts
 after 2 seconds of confirmed presence by day or 3 seconds at night (22:00–06:00,

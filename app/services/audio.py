@@ -45,13 +45,13 @@ def resolve_sequence(config: Dict[str, Any]) -> dict[str, tuple[Path, ...]]:
 #
 
 
-async def _drain_stderr(stream: asyncio.StreamReader | None, tail: bytearray) -> None:
+async def _drain_stderr(stream: asyncio.StreamReader | None, tail: bytearray, limit: int = 4096) -> None:
     if stream is None:
         return
 
     while chunk := await stream.read(4096):
         tail.extend(chunk)
-        del tail[:-4096]
+        del tail[:-limit]
 
 
 async def _terminate(process: asyncio.subprocess.Process) -> None:
@@ -101,6 +101,153 @@ class AudioPlayer:
     def validate(self) -> None:
         self._assets = resolve_sequence(self.config)
 
+    def _mixer_command(self) -> list[str]:
+        device = self.config["audio"]["device"]
+
+        if device == "default":
+            return ["amixer"]
+
+        card = re.search(r"(?:^|[:,])CARD=([^,]+)", device)
+
+        if card is None:
+            raise ValueError("AUDIO_VOLUME requires AUDIO_DEVICE=default or a device with CARD=")
+
+        return ["amixer", "-c", card.group(1)]
+
+    @staticmethod
+    def _playback_controls(contents: str) -> dict[str, str]:
+        matches = list(re.finditer(r"(?m)^Simple mixer control '(.+)',([0-9]+)\r?$", contents))
+        controls = {}
+
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(contents)
+            block = contents[match.start():end]
+
+            if re.search(r"(?m)^\s+Capabilities:.*\b(pvolume|volume)\b", block) is None:
+                continue
+
+            name = match.group(1)
+
+            if match.group(2) != "0":
+                name += f",{match.group(2)}"
+
+            controls[name] = block
+
+        return controls
+
+    @staticmethod
+    def _select_control(controls: dict[str, str]) -> str:
+        for name in ("Master", "PCM"):
+            if name in controls:
+                return name
+
+        if len(controls) == 1:
+            return next(iter(controls))
+        if not controls:
+            raise ValueError("No playback volume control available")
+
+        raise ValueError(f"Ambiguous playback volume controls: {', '.join(controls)}")
+
+    async def _read_command(self, command: list[str]) -> str:
+        stdout, stderr = bytearray(), bytearray()
+        process = None
+        readers: list[asyncio.Task[None]] = []
+        spawn = asyncio.create_task(asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        ))
+
+        try:
+            try:
+                process = await asyncio.shield(spawn)
+            except asyncio.CancelledError:
+                process = await spawn
+                raise
+            finally:
+                if process is not None:
+                    readers = [
+                        asyncio.create_task(_drain_stderr(process.stdout, stdout, 16384)),
+                        asyncio.create_task(_drain_stderr(process.stderr, stderr)),
+                    ]
+
+            code = await asyncio.wait_for(process.wait(), 2)
+
+            for reader in readers:
+                await _finish_stderr(reader)
+
+            if code != 0:
+                detail = stderr.decode("utf-8", errors="replace").strip()
+
+                raise ValueError(f"{command[0]} inspection failed (exit {code}): {detail}")
+            if len(stdout) >= 16384:
+                raise ValueError(f"{command[0]} inspection output exceeds read limit")
+
+            return stdout.decode("utf-8", errors="replace")
+        except asyncio.TimeoutError:
+            raise ValueError(f"{command[0]} inspection timed out") from None
+        except OSError as error:
+            raise ValueError(f"{command[0]} inspection unavailable: {error}") from None
+        finally:
+            try:
+                if process is not None:
+                    await _terminate(process)
+            finally:
+                for reader in readers:
+                    await _finish_stderr(reader)
+
+    async def inspect(self) -> Dict[str, Any]:
+        report: Dict[str, Any] = {
+            "playbackDevices": "", "mixerInfo": "", "mixerControl": None,
+            "mixerControls": [], "mixerPercentages": [], "mixerSwitches": [],
+            "inspectionErrors": [],
+        }
+        commands = {"playbackDevices": ["aplay", "-l"]}
+
+        try:
+            mixer = self._mixer_command()
+            commands.update({"mixerInfo": [*mixer, "info"], "contents": [*mixer, "scontents"]})
+        except ValueError as error:
+            report["inspectionErrors"].append(str(error))
+
+        results = await asyncio.gather(
+            *(self._read_command(command) for command in commands.values()),
+            return_exceptions=True,
+        )
+        contents = None
+
+        for key, result in zip(commands, results):
+            if isinstance(result, ValueError):
+                report["inspectionErrors"].append(str(result))
+            elif isinstance(result, BaseException):
+                raise result
+            elif key == "contents":
+                contents = result
+            else:
+                report[key] = result
+
+        if contents is not None:
+            controls = self._playback_controls(contents)
+            report["mixerControls"] = list(controls)
+
+            try:
+                control = self._select_control(controls)
+                report["mixerControl"] = control
+                common_volume = re.search(r"(?m)^\s+Capabilities:.*\bvolume\b", controls[control]) is not None
+                playback_lines = []
+
+                for line in controls[control].splitlines():
+                    if "Playback" in line or common_volume:
+                        playback_lines.append(line.split("Capture", 1)[0])
+
+                playback = "\n".join(playback_lines)
+                report["mixerPercentages"] = list(dict.fromkeys(int(value) for value in re.findall(r"\[([0-9]+)%\]", playback)))
+                report["mixerSwitches"] = list(dict.fromkeys(re.findall(r"\[(on|off)\]", playback)))
+            except ValueError as error:
+                report["inspectionErrors"].append(str(error))
+
+        return report
+
     async def set_volume(self, volume: int | None = None) -> None:
         if volume is None:
             volume = self.config["audio"]["volume"]
@@ -109,22 +256,16 @@ class AudioPlayer:
             return
 
         device = self.config["audio"]["device"]
-        mixer = ["amixer"]
-
-        if device != "default":
-            card = re.search(r"(?:^|[:,])CARD=([^,]+)", device)
-
-            if card is None:
-                raise ValueError("AUDIO_VOLUME requires AUDIO_DEVICE=default or a device with CARD=")
-
-            mixer.extend(["-c", card.group(1)])
+        mixer = self._mixer_command()
+        contents = await self._read_command([*mixer, "scontents"])
+        control = self._select_control(self._playback_controls(contents))
 
         tail = bytearray()
         process = None
         drain = None
         failure = ""
         spawn = asyncio.create_task(asyncio.create_subprocess_exec(
-            *mixer, "-q", "sset", "PCM", "playback", f"{volume}%",
+            *mixer, "-q", "sset", control, "playback", f"{volume}%",
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         ))
@@ -158,7 +299,7 @@ class AudioPlayer:
         if failure:
             detail = tail.decode("utf-8", errors="replace").strip()
 
-            raise ValueError(f"{failure}; device={device}; PCM volume={volume}%: {detail}")
+            raise ValueError(f"{failure}; device={device}; control={control}; volume={volume}%: {detail}")
 
     async def play(
         self,

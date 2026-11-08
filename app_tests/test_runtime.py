@@ -39,6 +39,25 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.runtime._stop_audio()
 
+    async def test_audio_status_inspects_without_changing_protection_or_volume(self):
+        self.runtime.controller.armed = True
+        self.runtime.controller.suppression = "audio_fault"
+        self.runtime.audio.inspect = AsyncMock(return_value={
+            "mixerInfo": "Card default 'USB'", "mixerControl": "Master",
+            "mixerControls": ["Master"], "mixerPercentages": [35], "mixerSwitches": ["on"],
+            "playbackDevices": "card 2: USB", "inspectionErrors": [],
+        })
+
+        report = await self.runtime.audio_status()
+
+        self.assertEqual(report["audioDevice"], "default")
+        self.assertEqual(report["mixerPercentages"], [35])
+        self.assertIsNone(report["audioVolume"])
+        self.assertTrue(self.runtime.status()["armed"])
+        self.assertEqual(self.runtime.status()["suppressionReason"], "audio_fault")
+        self.runtime.audio.set_volume.assert_not_awaited()
+        self.runtime.audio.play.assert_not_awaited()
+
     async def test_audio_failure_notification_includes_its_redacted_backend_reason(self):
         self.runtime.config["telegram"]["token"] = "123:secret-token"
         self.runtime.audio.play.side_effect = ValueError(

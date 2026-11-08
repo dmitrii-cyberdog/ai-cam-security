@@ -93,15 +93,16 @@ diagnostics; malformed supplied values fail with safe field names.
 Camera connection settings are split into `RTSP_LOGIN`, `RTSP_PASSWORD` (the
 camera verification code), `RTSP_HOST` (IP address or hostname), `RTSP_PORT`,
 and `RTSP_PATH`. The config loader assembles the RTSP URL and percent-encodes raw credentials once.
-`AUDIO_DEVICE` selects the Raspberry Pi speaker output. Leave it empty or unset
-to use the system default ALSA device; a supplied value overrides it.
+`AUDIO_DEVICE` selects the Raspberry Pi/Linux speaker output. Leave it empty or unset
+to honor the system default ALSA device; a supplied value overrides it. The app
+does not select another output when the configured/default device fails.
 
 Set `AUDIO_VOLUME` to an integer percentage from `0` to `100` to apply the device's
-`PCM` playback volume once at service startup. Leave it empty or unset to
+system-wide playback volume once at service startup. Leave it empty or unset to
 keep the existing mixer volume at startup. Volume control requires `amixer` from `alsa-utils` and
 `AUDIO_DEVICE=default` or a device containing `CARD=`, such as
 `plughw:CARD=UACDemoV10,DEV=0`. A startup mixer error is logged and shown in
-`/status`; the service remains available for diagnostics. Restart after changing
+`/audio_status`; the service remains available for diagnostics. Restart after changing
 the initial setting. `/arm` does not apply volume or require `amixer`.
 
 Use `/volume 50` in Telegram to set volume immediately. Values from `0` (mute)
@@ -110,6 +111,15 @@ unavailable. A failed change reports the mixer error and keeps the previous
 reported value. It does not change protection, stop playback, or clear alarm
 suppression. Telegram changes are not written to environment files; restart
 reapplies `AUDIO_VOLUME` when configured.
+
+Mixer selection prefers an advertised playback-volume `Master` control, then
+`PCM`, then a single remaining playback-volume control. Common volume controls
+are supported; capture-only controls are excluded. Multiple other controls are
+reported as ambiguous. The app changes the selected ALSA mixer, preserves mute
+switches, and does not use software gain. Playback and mixer defaults are
+configured by Linux and can differ; inspect both before changing host settings.
+Live playback/volume support targets Raspberry Pi and Linux; macOS playback is
+out of scope. Windows CI verifies offline behavior and types.
 
 Folder layout:
 
@@ -193,7 +203,8 @@ explain how to resume automatic alarms with a successful `/arm`.
 
 | Command | Result |
 | --- | --- |
-| `/status` | Protection, component/queue health, CPU temperature, service uptime, load averages, host memory, last frame age, audio selection and last failure |
+| `/status` | Protection, component/queue health, CPU temperature, service uptime, load averages, host memory and last frame age; audio health summary |
+| `/audio_status` | Audio configuration, backend, playback hardware inventory, default/selected mixer info, playback-volume controls, measured levels/switches and last failure |
 | `/photo` | Wait up to 5 seconds for a frame captured after the request and send it to the requesting chat; report unavailable if no fresh frame arrives |
 | `/arm` | Check camera/detector/audio readiness, clear suppression and arm; keep volume unchanged |
 | `/disarm` | Disable automation and stop all playback |
@@ -219,14 +230,17 @@ clock; last frame age remains visible after camera loss. No frame ever received
 is shown explicitly. The kernel documents the [thermal-zone units](https://kernel.org/doc/html/v5.7/driver-api/thermal/sysfs-api.html)
 and [memory fields](https://www.kernel.org/doc/html/latest/filesystems/proc.html).
 
-Status shows the effective audio device, configured initial volume, last
+`/audio_status` shows the configured audio device, initial volume, last
 successfully applied volume, and latest audio failure with its UTC timestamp.
-The applied volume is unknown until the service successfully sets it; status
-does not read back mixer values changed by another application. That failure is
+The last applied volume is unknown until the service successfully sets it.
+Measured mixer percentages/switch states are read separately from ALSA and can
+reflect changes by other applications. That failure is
 history retained until another failure or restart, even after recovery. A ready
 asset/backend check does not prove the speaker can play. Manual alarms do not
 require camera/model/detector readiness or `amixer`; camera faults leave an
 active manual siren running, while automatic alarms still stop on vision faults.
+Audio status runs bounded read-only queries as the service account. A device
+listed in the inventory is not proof that it can open or produce audible sound.
 Audio-fault deactivation notifications also include the sanitized backend error
 captured for that playback, so the cause is visible without a separate status request.
 

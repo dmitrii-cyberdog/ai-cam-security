@@ -1,6 +1,8 @@
 import asyncio
+import re
 import unittest
 from datetime import datetime, timedelta, timezone
+from html import unescape
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -31,16 +33,24 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
             "audioDevice": "default", "audioVolume": None, "initialAudioVolume": None, "lastAudioFailure": None,
             "system": {"cpuTemperatureCelsius": None, "loadAverage": None, "memoryUsedMiB": None, "memoryTotalMiB": None, "uptimeSeconds": 0, "lastFrameAgeSeconds": None},
         }
-        self.service = TelegramService(self.config, self.execute, lambda: self.status, self.get_frame)
+        self.audio_report = {
+            **self.status, "backend": "ALSA (aplay/amixer)",
+            "playbackDevices": "card 2: UACDemoV10 [USB Audio]",
+            "mixerInfo": "Card default 'UACDemoV10'/'USB Audio'",
+            "mixerControl": "PCM", "mixerControls": ["PCM"],
+            "mixerPercentages": [50], "mixerSwitches": ["on"], "inspectionErrors": [],
+        }
+        self.get_audio_status = AsyncMock(return_value=self.audio_report)
+        self.service = TelegramService(self.config, self.execute, lambda: self.status, self.get_frame, self.get_audio_status)
         self.service._cutoff = datetime.now(timezone.utc) - timedelta(seconds=1)
 
-    async def test_status_shows_audio_selection_and_redacted_failure_history(self):
-        self.status.update(audioDevice="plughw:CARD=Speaker,DEV=0", audioVolume=25)
-        self.status["lastAudioFailure"] = {
+    async def test_audio_status_shows_selection_and_redacted_failure_history(self):
+        self.audio_report.update(audioDevice="plughw:CARD=Speaker,DEV=0", audioVolume=25)
+        self.audio_report["lastAudioFailure"] = {
             "operation": "playback", "atUtc": "2026-11-08T20:00:00Z",
             "reason": "<PCM> & 123%3Asecret-token " + "x" * 1000,
         }
-        reply = self.service._status_reply()
+        reply = self.service._audio_status_reply(self.audio_report)
 
         self.assertIn("plughw:CARD=Speaker,DEV=0", reply)
         self.assertIn("25%", reply)
@@ -50,9 +60,88 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret-token", reply)
         self.assertNotIn("x" * 301, reply)
 
-        self.status["audioVolume"] = None
+        self.audio_report["audioVolume"] = None
 
-        self.assertIn("Unchanged", self.service._status_reply())
+        self.assertIn("Unchanged", self.service._audio_status_reply(self.audio_report))
+
+    async def test_general_status_keeps_only_audio_health_summary(self):
+        reply = self.service._status_reply()
+
+        self.assertIn("Audio: ✅ Ready", reply)
+        self.assertNotIn("Audio device:", reply)
+        self.assertNotIn("Last applied volume", reply)
+        self.assertNotIn("Last audio failure", reply)
+        self.get_audio_status.assert_not_awaited()
+
+    async def test_audio_status_uses_read_only_callback_and_escapes_inspection(self):
+        self.audio_report.update(mixerInfo="<USB> & 123%3Asecret-token", inspectionErrors=["mixer unavailable"])
+        update = self.update()
+        update.message.text = "/audio_status"
+
+        await self.service._handle(update, None)
+
+        self.get_audio_status.assert_awaited_once_with()
+        self.execute.assert_not_awaited()
+        reply = update.message.reply_text.call_args.args[0]
+        self.assertIn("Audio status", reply)
+        self.assertIn("&lt;USB&gt; &amp; [REDACTED]", reply)
+        self.assertIn("Measured mixer volume: 50%", reply)
+        self.assertIn("mixer unavailable", reply)
+        self.assertNotIn("secret-token", reply)
+
+    async def test_audio_status_preserves_authorization_and_duplicate_checks(self):
+        blocked = self.update(effective_user=SimpleNamespace(id=100))
+        blocked.message.text = "/audio_status"
+        await self.service._handle(blocked, None)
+        self.get_audio_status.assert_not_awaited()
+
+        update = self.update(update_id=2)
+        update.message.text = "/audio_status"
+        await self.service._handle(update, None)
+        await self.service._handle(update, None)
+
+        self.get_audio_status.assert_awaited_once_with()
+
+    async def test_slow_audio_status_does_not_block_disarm(self):
+        entered = asyncio.Event()
+
+        async def inspect():
+            entered.set()
+            await asyncio.Event().wait()
+
+        self.get_audio_status.side_effect = inspect
+        update = self.update()
+        update.message.text = "/audio_status"
+        query = asyncio.create_task(self.service._handle(update, None))
+
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            await asyncio.wait_for(self.service._handle(self.update(update_id=2), None), 1)
+            self.execute.assert_awaited_once_with("disarm")
+        finally:
+            query.cancel()
+            await asyncio.gather(query, return_exceptions=True)
+
+    async def test_audio_status_timeout_has_a_clear_reply(self):
+        self.get_audio_status.side_effect = asyncio.TimeoutError
+        update = self.update()
+        update.message.text = "/audio_status"
+
+        await self.service._handle(update, None)
+
+        self.assertIn("Audio inspection timed out", update.message.reply_text.call_args.args[0])
+
+    async def test_audio_status_unicode_details_remain_bounded(self):
+        self.audio_report.update(
+            audioDevice="🔥" * 1000, mixerInfo="🔥" * 1000,
+            mixerControl="🔥" * 1000, mixerControls=["🔥" * 1000],
+            playbackDevices="🔥" * 5000, inspectionErrors=["🔥" * 5000],
+            lastAudioFailure={"atUtc": "2026-11-08T20:00:00Z", "operation": "playback", "reason": "🔥" * 1000},
+        )
+        reply = self.service._audio_status_reply(self.audio_report)
+        visible = unescape(re.sub(r"<[^>]+>", "", reply))
+
+        self.assertLessEqual(len(visible.encode("utf-16-le")) // 2, 4096)
 
     async def test_status_formats_host_metrics_with_units_and_zero_values(self):
         self.status["system"].update(cpuTemperatureCelsius=57.321, loadAverage=(0, 0.5, 1.5), memoryUsedMiB=0, memoryTotalMiB=4000, uptimeSeconds=3661, lastFrameAgeSeconds=0)
@@ -124,16 +213,16 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
 
         self.execute.assert_awaited_once_with("volume 50")
 
-    async def test_status_distinguishes_initial_from_last_applied_volume(self):
-        self.status.update(initialAudioVolume=25, audioVolume=50)
-        reply = self.service._status_reply()
+    async def test_audio_status_distinguishes_initial_from_last_applied_volume(self):
+        self.audio_report.update(initialAudioVolume=25, audioVolume=50)
+        reply = self.service._audio_status_reply(self.audio_report)
 
         self.assertIn("Initial volume: 25%", reply)
         self.assertIn("Last applied volume: 50%", reply)
 
-        self.status["audioVolume"] = None
+        self.audio_report["audioVolume"] = None
 
-        self.assertIn("Last applied volume: Unknown", self.service._status_reply())
+        self.assertIn("Last applied volume: Unknown", self.service._audio_status_reply(self.audio_report))
 
     def application(self):
         app = Mock(
@@ -384,10 +473,12 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
             update.message.reply_text.assert_awaited_once()
             self.assertIs(update.message.reply_text.call_args.kwargs["reply_markup"], COMMAND_KEYBOARD)
 
-            if name in {"status", "help", "photo"}:
+            if name in {"status", "audio_status", "help", "photo"}:
                 self.execute.assert_not_awaited()
 
-                if name == "photo":
+                if name == "audio_status":
+                    self.get_audio_status.assert_awaited_once_with()
+                elif name == "photo":
                     self.get_frame.assert_awaited_once_with()
                 else:
                     self.assertIn("Camera alarm status" if name == "status" else "Camera alarm commands", update.message.reply_text.call_args.args[0])
@@ -602,7 +693,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_notification_chat_still_registers_commands(self):
         self.config["telegram"]["notificationChatId"] = None
-        service = TelegramService(self.config, self.execute, lambda: {"armed": False}, self.get_frame)
+        service = TelegramService(self.config, self.execute, lambda: {"armed": False}, self.get_frame, self.get_audio_status)
         stop = asyncio.Event()
         app = self.application()
         app.updater.start_polling.side_effect = lambda **kwargs: stop.set()
@@ -615,7 +706,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unconfigured_telegram_does_not_initialize_or_notify(self):
         self.config["telegram"]["token"] = ""
-        service = TelegramService(self.config, self.execute, lambda: {"armed": False}, self.get_frame)
+        service = TelegramService(self.config, self.execute, lambda: {"armed": False}, self.get_frame, self.get_audio_status)
         stop = asyncio.Event()
         stop.set()
 

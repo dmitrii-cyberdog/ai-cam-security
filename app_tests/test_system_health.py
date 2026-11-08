@@ -52,6 +52,16 @@ class SystemHealthTests(unittest.TestCase):
         self.assertIsNone(health["loadAverage"])
         self.assertEqual(health["memoryUsedMiB"], 3000)
 
+    def test_missing_load_average_api_preserves_other_metrics(self):
+        self.zone(0, "cpu-thermal", "57321")
+
+        with patch("app.services.system_health.os", spec=[]):
+            health = read_system_health()
+
+        self.assertIsNone(health["loadAverage"])
+        self.assertEqual(health["cpuTemperatureCelsius"], 57.321)
+        self.assertEqual(health["memoryUsedMiB"], 3000)
+
     def test_invalid_memory_does_not_hide_temperature(self):
         self.zone(0, "cpu-thermal", "0")
 

@@ -11,6 +11,11 @@ document's per-arm-volume requirements: AUDIO_VOLUME now initializes once at
 startup; `/volume 0–100` changes the session volume; `/arm` leaves it unchanged.
 Earlier investigation/results below are preserved as historical records.
 
+The [Linux audio status plan](2026-11-08-linux-audio-status.md) subsequently moves
+detailed audio diagnostics to `/audio_status`, keeping general `/status` and an
+audio-health summary. It preserves ALSA/system-wide volume, honors the Linux
+default without fallback, and selects advertised playback-volume controls.
+
 **Architecture:** Keep the asyncio runtime as the owner of health and alarm state. Capture bounded ALSA diagnostics at the subprocess boundary, report them through the existing JSON logger, and expose a concise last-failure summary through runtime status. Separate audio readiness from automatic-detection readiness; collect lightweight host metrics without a new dependency or monitoring service.
 
 **Tech Stack:** Python 3.11–3.14, asyncio, unittest, Poetry, python-telegram-bot, Linux sysfs/procfs, ALSA aplay/amixer, Raspberry Pi OS/systemd.

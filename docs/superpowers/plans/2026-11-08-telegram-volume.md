@@ -4,6 +4,10 @@
 
 **Goal:** Apply AUDIO_VOLUME once at service startup and allow authorized `/volume 50` changes without resetting them on `/arm`.
 
+The later [Linux audio status plan](2026-11-08-linux-audio-status.md) adds
+advertised mixer-control selection and moves detailed audio information to
+`/audio_status`. Linux default routing and system-wide volume remain in use.
+
 **Architecture:** Reuse the existing amixer subprocess and error reporting. Runtime owns the last successfully applied percentage and serializes mixer writes independently of alarm commands. Telegram forwards the volume argument through the existing command callback.
 
 **Tech Stack:** Python, asyncio, unittest, python-telegram-bot 22, ALSA amixer.
