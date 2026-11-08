@@ -50,6 +50,7 @@ class IncidentEvent:
     at: float
     at_utc: datetime
     frame: Frame | None
+    audio_error: str = ""
 
 
 @dataclass(frozen=True)

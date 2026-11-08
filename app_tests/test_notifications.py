@@ -1,6 +1,8 @@
 import unittest
+import re
 from dataclasses import replace
 from datetime import timedelta
+from html import unescape
 from unittest.mock import patch
 
 import cv2
@@ -70,6 +72,22 @@ class NotificationTests(unittest.TestCase):
 
         self.assertIn("Reason: Audio playback failed", note.text)
         self.assertIn("<i>Check the speaker, then use /arm.", note.text)
+        self.assertNotIn("Audio error:", note.text)
+
+    def test_audio_failure_details_are_escaped_and_caption_stays_bounded(self):
+        event = replace(self.event("deactivated", 10), reason="audio_fault", audio_error="<PCM> & " + "x" * 1000)
+        note = prepare_notification(event, 2)
+
+        self.assertIn("<b>Audio error:</b> &lt;PCM&gt; &amp;", note.text)
+        self.assertNotIn("<PCM>", note.text)
+        self.assertNotIn("x" * 301, note.text)
+
+        event = replace(event, phase="🔥" * 80, audio_error="🔥" * 1000)
+        note = prepare_notification(event, 2)
+        visible_text = unescape(re.sub(r"<[^>]+>", "", note.text))
+
+        self.assertLessEqual(len(visible_text.encode("utf-16-le")) // 2, 1024)
+        self.assertIn("successful /arm", note.text)
 
     def test_dynamic_labels_are_escaped_and_caption_stays_bounded(self):
         event = replace(self.event("deactivated", 10), phase="<alarm> & " * 1000, reason="<fault> & " * 1000)

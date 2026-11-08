@@ -154,3 +154,22 @@ Canonical-temp full-suite command (resolves the macOS temporary-directory alias 
 ```sh
 poetry run python -c 'import tempfile, pathlib, unittest; tempfile.tempdir = str(pathlib.Path(tempfile.gettempdir()).resolve()); result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.discover("app_tests")); raise SystemExit(not result.wasSuccessful())'
 ```
+
+## Follow-up: failure details in incident notifications (2026-11-08)
+
+The user reported that the audio-fault deactivation notification still displayed
+only “Audio playback failed.” The initial implementation exposed details in logs
+and status but did not carry them through the incident event/notification path.
+
+- Added a sanitized playback-error snapshot to the queued audio result and its
+  deactivation event; later failures cannot replace that incident's explanation.
+- The notification now includes an escaped “Audio error” line, bounded to 300
+  UTF-16 units. Long error summaries retain initial device/exit context and the
+  backend's final explanation. Suppression and recovery rules remain unchanged.
+- Regression tests reproduced missing details and caption overflow before fixes;
+  tests also cover stale generations, redaction, HTML escaping and queued error
+  independence from later failures.
+- Verification: 60 runtime/notification/delivery tests passed; all 214 tests passed
+  with the canonical-temp bootstrap; mypy (16 files) and `git diff --check` passed.
+  Independent review found no issues in the notification fix. No deployment,
+  restart, live sound playback or hardware diagnosis was performed.

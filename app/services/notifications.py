@@ -50,6 +50,10 @@ def prepare_notification(event: IncidentEvent, max_frame_age: float) -> Notifica
     photo = None
 
     if event.reason == "audio_fault":
+        if event.audio_error:
+            detail = event.audio_error.encode("utf-16-le")[:600].decode("utf-16-le", errors="ignore")
+            text += f"\n\n<b>Audio error:</b> {escape(detail)}"
+
         text += "\n\n<i>Check the speaker, then use /arm. A successful /arm resumes automatic alarms.</i>"
 
     if event.kind != "still_there":

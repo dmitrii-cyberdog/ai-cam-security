@@ -16,6 +16,10 @@ metrics display unavailable independently and do not affect alarm state.
 ALSA subprocess stderr is drained continuously, retaining its last 4096 bytes;
 errors include backend/device/operation context in the existing redacted JSON
 logs. Status retains a concise last failure until another failure or restart.
+Audio-fault deactivation notifications include a sanitized error snapshot from
+that playback, independently of later failures; details are escaped and bounded
+for Telegram captions. Long summaries retain both operation context and the
+backend's final explanation.
 Manual sirens require configured WAV assets and aplay, independent of camera,
 model, detector or amixer. Manual volume remains unchanged. Automatic readiness,
 freshness requirements, suppression/recovery, and alarm timing remain as before.

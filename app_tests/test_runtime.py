@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from app.runtime import Runtime, check_readiness
 from app.services.alarm import AlarmController, PlayKey
 from app.services.models import VisionFault
+from app.services.notifications import prepare_notification
 from app_tests.test_alarm import DAY, config, observation
 
 #
@@ -37,6 +38,44 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.runtime._stop_audio()
+
+    async def test_audio_failure_notification_includes_its_redacted_backend_reason(self):
+        self.runtime.config["telegram"]["token"] = "123:secret-token"
+        self.runtime.audio.play.side_effect = ValueError(
+            "audio_exit_1; device=default; key=alarm; asset=common/alarm.wav: "
+            + "x" * 1000
+            + " Device or resource busy <PCM> & 123%3Asecret-token"
+        )
+
+        await self.runtime.execute("alarm")
+        await self.runtime._audio_task
+
+        self.runtime._record_audio_failure("volume", ValueError("a later unrelated failure"))
+        await self.runtime._step()
+
+        event = next(event for event in self.events if event.reason == "audio_fault")
+        note = prepare_notification(event, 2)
+
+        self.assertIn("Reason: Audio playback failed", note.text)
+        self.assertIn("audio_exit_1; device=default", note.text)
+        self.assertIn("Device or resource busy &lt;PCM&gt; &amp;", note.text)
+        self.assertIn("[REDACTED]", note.text)
+        self.assertNotIn("secret-token", note.text)
+        self.assertNotIn("later unrelated", note.text)
+
+    async def test_stale_audio_failure_does_not_notify_a_new_alarm(self):
+        self.runtime.audio.play.side_effect = ValueError("old playback failed")
+
+        await self.runtime.execute("alarm")
+        await self.runtime._audio_task
+        await self.runtime.execute("stop")
+        self.events.clear()
+        self.runtime.audio.play.side_effect = None
+
+        await self.runtime.execute("alarm")
+        await self.runtime._step()
+
+        self.assertFalse(any(event.reason == "audio_fault" for event in self.events))
 
     async def test_playback_failure_is_logged_and_retained(self):
         self.runtime.controller.command("alarm", 0, DAY)

@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import shutil
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -92,7 +93,7 @@ class Runtime:
             self.telegram.send, config["detection"]["maxFrameAgeSeconds"]
         )
         self._audio_task: asyncio.Task[None] | None = None
-        self._audio_events: asyncio.Queue[tuple[int, str]] = asyncio.Queue(maxsize=16)
+        self._audio_events: asyncio.Queue[tuple[int, str, str]] = asyncio.Queue(maxsize=16)
         self._audio_lock = asyncio.Lock()
         self._command_serial = 0
         self._camera_health = "unavailable"
@@ -223,7 +224,7 @@ class Runtime:
 
         return str(self.controller.status()["lastCommandResult"])
 
-    def _record_audio_failure(self, operation: str, error: Exception, **context: Any) -> None:
+    def _record_audio_failure(self, operation: str, error: Exception, **context: Any) -> str:
         reason = str(error)
         secrets = [self.config["camera"][key] for key in ("rtspUrl", "login", "password")]
         secrets.append(self.config["telegram"]["token"])
@@ -237,9 +238,11 @@ class Runtime:
         for secret in sorted(variants, key=len, reverse=True):
             reason = reason.replace(secret, "[REDACTED]")
 
+        summary = reason if len(reason) <= 300 else f"{reason[:120]}…{reason[-179:]}"
+
         self._last_audio_failure = {
             "operation": operation,
-            "reason": reason[:300],
+            "reason": summary,
             "atUtc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         details = {
@@ -254,6 +257,8 @@ class Runtime:
         else:
             logger.exception("Audio operation failed", details)
 
+        return str(self._last_audio_failure["reason"])
+
     async def _stop_audio(self) -> None:
         task = self._audio_task
         await self.audio.stop()
@@ -264,12 +269,12 @@ class Runtime:
         if self._audio_task is task:
             self._audio_task = None
 
-    def _audio_callback(self, generation: int, event: str) -> None:
+    def _audio_callback(self, generation: int, event: str, error: str = "") -> None:
         if generation == self.controller.generation and not self._closing:
             if event == "started":
                 logger.info("Audio playback started", {"generation": generation, "incident": self.controller.incident_id})
 
-            self._audio_events.put_nowait((generation, event))
+            self._audio_events.put_nowait((generation, event, error))
 
     async def _play(self, effect: PlayKey) -> None:
         try:
@@ -283,13 +288,13 @@ class Runtime:
         except Exception as error:
             if effect.generation == self.controller.generation and not self._closing:
                 self._audio_health = "audio_fault"
-                self._record_audio_failure(
+                reason = self._record_audio_failure(
                     "playback", error,
                     generation=effect.generation,
                     incident=effect.incident_id,
                     key=effect.key,
                 )
-                self._audio_callback(effect.generation, "failed")
+                self._audio_callback(effect.generation, "failed", reason)
         else:
             self._audio_callback(effect.generation, "finished")
         finally:
@@ -373,8 +378,18 @@ class Runtime:
         self._notify_camera_status(now, utc)
 
         while not self._audio_events.empty():
-            generation, event = self._audio_events.get_nowait()
-            await self._apply(self.controller.audio_event(generation, event, now, utc))
+            generation, event, error = self._audio_events.get_nowait()
+            effects = self.controller.audio_event(generation, event, now, utc)
+
+            if error:
+                effects = [
+                    replace(effect, audio_error=error)
+                    if isinstance(effect, IncidentEvent) and effect.reason == "audio_fault"
+                    else effect
+                    for effect in effects
+                ]
+
+            await self._apply(effects)
 
     def status(self) -> Dict[str, Any]:
         now = time.monotonic()

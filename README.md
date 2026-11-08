@@ -216,6 +216,8 @@ history retained until another failure or restart, even after recovery. A ready
 asset/backend check does not prove the speaker can play. Manual alarms do not
 require camera/model/detector readiness or `amixer`; camera faults leave an
 active manual siren running, while automatic alarms still stop on vision faults.
+Audio-fault deactivation notifications also include the sanitized backend error
+captured for that playback, so the cause is visible without a separate status request.
 
 Automatic alarms are allowed whenever armed, both day and night. Night hours
 only select the confirmation time; they do not arm the service.
