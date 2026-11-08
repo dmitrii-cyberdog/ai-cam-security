@@ -101,8 +101,9 @@ class AudioPlayer:
     def validate(self) -> None:
         self._assets = resolve_sequence(self.config)
 
-    async def set_volume(self) -> None:
-        volume = self.config["audio"]["volume"]
+    async def set_volume(self, volume: int | None = None) -> None:
+        if volume is None:
+            volume = self.config["audio"]["volume"]
 
         if volume is None:
             return

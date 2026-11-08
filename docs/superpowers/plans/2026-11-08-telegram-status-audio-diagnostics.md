@@ -6,6 +6,11 @@
 
 **Status:** Software implemented after the user approved execution on 2026-11-08. Live Pi acceptance remains pending; no deployment or live sound tests were performed.
 
+The later [Telegram volume plan](2026-11-08-telegram-volume.md) supersedes this
+document's per-arm-volume requirements: AUDIO_VOLUME now initializes once at
+startup; `/volume 0–100` changes the session volume; `/arm` leaves it unchanged.
+Earlier investigation/results below are preserved as historical records.
+
 **Architecture:** Keep the asyncio runtime as the owner of health and alarm state. Capture bounded ALSA diagnostics at the subprocess boundary, report them through the existing JSON logger, and expose a concise last-failure summary through runtime status. Separate audio readiness from automatic-detection readiness; collect lightweight host metrics without a new dependency or monitoring service.
 
 **Tech Stack:** Python 3.11–3.14, asyncio, unittest, Poetry, python-telegram-bot, Linux sysfs/procfs, ALSA aplay/amixer, Raspberry Pi OS/systemd.

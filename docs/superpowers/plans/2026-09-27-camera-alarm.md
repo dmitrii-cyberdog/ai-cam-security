@@ -12,6 +12,11 @@
 
 ## Diagnostics amendment (2026-11-08)
 
+The later [Telegram volume plan](2026-11-08-telegram-volume.md) supersedes
+per-arm mixer application: initial volume is applied once at startup,
+`/volume 0–100` changes it during the session, and `/arm` keeps current volume.
+See the matching design amendment for error and persistence semantics.
+
 The [status/audio diagnostics plan](2026-11-08-telegram-status-audio-diagnostics.md)
 adds bounded ALSA error reporting, Telegram host metrics and last-failure history,
 and explicit audio-only manual readiness. Manual sirens do not require RTSP,

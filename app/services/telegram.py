@@ -34,6 +34,7 @@ COMMANDS = {
     "disarm": "Disable automatic detection and stop playback",
     "alarm": "Start the manual siren",
     "stop": "Stop playback, keeping armed mode",
+    "volume": "Set speaker volume: /volume 50 (0-100)",
     "help": "Show commands",
 }
 COMMAND_TITLES = {
@@ -43,6 +44,7 @@ COMMAND_TITLES = {
     "disarm": "❌ Disarm protection",
     "alarm": "🚨 Start siren",
     "stop": "⏹️ Stop playback",
+    "volume": "🔊 Set volume",
     "help": "❓ Help",
 }
 BUTTON_COMMANDS = {title: name for name, title in COMMAND_TITLES.items()}
@@ -169,7 +171,8 @@ class TelegramService:
             f"Detector: {self._label(status['detector'])}\n"
             f"Audio: {self._label(status['audio'])}\n"
             f"Audio device: {self._text(status['audioDevice'])}\n"
-            f"Volume on /arm: {str(status['audioVolume']) + '%' if status['audioVolume'] is not None else 'Unchanged'}\n"
+            f"Initial volume: {str(status['initialAudioVolume']) + '%' if status['initialAudioVolume'] is not None else 'Unchanged'}\n"
+            f"Last applied volume: {str(status['audioVolume']) + '%' if status['audioVolume'] is not None else 'Unknown'}\n"
             f"Telegram: {self._label(status['telegram'])}\n\n"
             "<b>🌡️ Host health</b>\n"
             f"CPU temperature: {temperature_text}\n"
@@ -202,6 +205,9 @@ class TelegramService:
         return reply
 
     def _command_reply(self, name: str, result: str) -> str:
+        if name == "volume" and result.startswith("volume "):
+            return f"<b>🔊 Volume set to {self._text(result.split()[1])}%</b>\n\n<i>AUDIO_VOLUME applies again on restart when configured.</i>"
+
         if result != name:
             return f"<b>⚠️ /{name} — command not completed</b>\n\n{self._text(result, 1000)}\n\n<i>Use /status to check the service.</i>"
 
@@ -288,7 +294,7 @@ class TelegramService:
         name = BUTTON_COMMANDS.get(text, "")
 
         if not name and text.startswith("/"):
-            name = text.split(" ", 1)[0].split("@", 1)[0].removeprefix("/").lower()
+            name = text.split()[0].split("@", 1)[0].removeprefix("/").lower()
 
         if name not in COMMANDS:
             return
@@ -331,7 +337,12 @@ class TelegramService:
                 else "<b>⚠️ Photo unavailable</b>\n\nNo fresh camera photo could be obtained.\n<i>Use /status to check the camera.</i>"
             )
         else:
-            result = await self.execute(name)
+            command = name
+
+            if name == "volume" and text.startswith("/"):
+                command = " ".join([name, *text.split()[1:]])
+
+            result = await self.execute(command)
             reply = self._command_reply(name, result)
 
         try:

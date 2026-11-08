@@ -106,31 +106,31 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.audio.set_volume.side_effect = ValueError("Audio volume command failed: PCM missing")
 
         with self.assertLogs("ai-cam-security", level="ERROR"):
-            await self.runtime.execute("arm")
+            result = await self.runtime.execute("volume 75")
 
+        self.assertIn("Cannot set volume", result)
         self.runtime.audio.set_volume.side_effect = None
-        await self.runtime.execute("arm")
-
+        self.assertEqual(await self.runtime.execute("volume 50"), "volume 50")
         self.assertIn("PCM missing", self.runtime.status()["lastAudioFailure"]["reason"])
         self.assertEqual(self.runtime.status()["lastAudioFailure"]["operation"], "volume")
 
-    async def test_superseded_mixer_failure_cannot_fault_new_manual_alarm(self):
+    async def test_failed_volume_during_manual_alarm_preserves_playback_health(self):
         entered, release = asyncio.Event(), asyncio.Event()
 
-        async def volume():
+        async def volume(value):
             entered.set()
             await release.wait()
-            raise ValueError("old mixer failure")
+            raise ValueError("mixer failure")
 
         self.runtime.audio.set_volume.side_effect = volume
-        arm = asyncio.create_task(self.runtime.execute("arm"))
-        await entered.wait()
+        change = asyncio.create_task(self.runtime.execute("volume 50"))
+        await asyncio.wait_for(entered.wait(), 1)
         await self.runtime.execute("alarm")
         release.set()
 
-        self.assertEqual(await arm, "Command superseded")
-        self.assertIsNone(self.runtime.status()["lastAudioFailure"])
+        self.assertIn("Cannot set volume: mixer failure", await change)
         self.assertEqual(self.runtime.status()["audio"], "ready")
+        self.assertTrue(self.runtime.status()["manual"])
 
     async def test_superseded_validation_failure_cannot_fault_new_alarm(self):
         entered, release = threading.Event(), threading.Event()
@@ -154,13 +154,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.runtime.status()["lastAudioFailure"])
         self.assertEqual(self.runtime.status()["audio"], "ready")
 
-    async def test_validation_failure_after_volume_refuses_arm_with_diagnostics(self):
-        self.runtime.audio.validate.side_effect = [None, ValueError("asset unreadable after mixer")]
+    async def test_validation_failure_refuses_arm_with_diagnostics(self):
+        self.runtime.audio.validate.side_effect = ValueError("asset unreadable")
 
         with self.assertLogs("ai-cam-security", level="ERROR"):
             result = await self.runtime.execute("arm")
 
-        self.assertEqual(result, "Cannot arm: asset unreadable after mixer")
+        self.assertEqual(result, "Cannot arm: asset unreadable")
         self.assertFalse(self.runtime.status()["armed"])
         self.assertEqual(self.runtime.status()["audio"], "unavailable")
         self.assertEqual(self.runtime.status()["lastAudioFailure"]["operation"], "validation")
@@ -378,20 +378,27 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(await self.runtime.get_frame())
 
-    async def test_arm_applies_volume_before_arming(self):
-        async def set_volume():
-            self.assertFalse(self.runtime.status()["armed"])
-
-        self.runtime.audio.set_volume.side_effect = set_volume
-
-        self.assertEqual(await self.runtime.execute("arm"), "arm")
-        self.runtime.audio.set_volume.assert_awaited_once()
-        self.assertTrue(self.runtime.status()["armed"])
-
-        self.runtime.audio.set_volume.side_effect = None
+    async def test_arm_does_not_reset_runtime_volume(self):
+        self.runtime.config["audio"]["volume"] = 25
+        self.assertEqual(await self.runtime.execute("volume 50"), "volume 50")
 
         await self.runtime.execute("arm")
-        self.assertEqual(self.runtime.audio.set_volume.await_count, 2)
+        await self.runtime.execute("disarm")
+        await self.runtime.execute("arm")
+
+        self.runtime.audio.set_volume.assert_awaited_once_with(50)
+        self.assertEqual(self.runtime.status()["audioVolume"], 50)
+        self.assertEqual(self.runtime.status()["initialAudioVolume"], 25)
+        self.assertTrue(self.runtime.status()["armed"])
+
+    async def test_camera_loss_during_asset_validation_prevents_arm(self):
+        def validate():
+            self.runtime._camera_health = "unavailable"
+
+        self.runtime.audio.validate.side_effect = validate
+
+        self.assertIn("Cannot arm: Camera/detector needs fresh observations", await self.runtime.execute("arm"))
+        self.assertFalse(self.runtime.status()["armed"])
 
     async def test_camera_loss_and_recovery_notify_once_while_disarmed(self):
         for at, message in (
@@ -499,34 +506,24 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.runtime.audio.play.assert_not_awaited()
 
-    async def test_camera_loss_during_volume_application_prevents_arm(self):
-        async def set_volume():
-            self.runtime._camera_health = "unavailable"
+    async def test_volume_change_does_not_require_camera_or_alter_armed_mode(self):
+        await self.runtime.execute("arm")
+        self.runtime._camera_health = "unavailable"
 
-        self.runtime.audio.set_volume.side_effect = set_volume
+        self.assertEqual(await self.runtime.execute("volume 0"), "volume 0")
+        self.assertEqual(self.runtime.status()["audioVolume"], 0)
+        self.assertTrue(self.runtime.status()["armed"])
+        self.runtime.audio.play.assert_not_awaited()
 
-        self.assertIn(
-            "Cannot arm: Camera/detector needs fresh observations",
-            await self.runtime.execute("arm"),
-        )
-        self.assertFalse(self.runtime.status()["armed"])
-
-    async def test_volume_failure_prevents_arm_and_preserves_suppression(self):
+    async def test_volume_failure_preserves_suppression_and_previous_volume(self):
+        await self.runtime.execute("volume 30")
         self.runtime.controller.suppression = "audio_fault"
         self.runtime.audio.set_volume.side_effect = ValueError("Audio volume failed")
 
-        self.assertEqual(
-            await self.runtime.execute("arm"), "Cannot arm: Audio volume failed"
-        )
+        self.assertEqual(await self.runtime.execute("volume 50"), "Cannot set volume: Audio volume failed")
         self.assertFalse(self.runtime.status()["armed"])
         self.assertEqual(self.runtime.status()["suppressionReason"], "audio_fault")
-        self.assertEqual(self.runtime.status()["audio"], "audio_fault")
-
-        self.runtime.audio.set_volume.side_effect = None
-
-        self.assertEqual(await self.runtime.execute("arm"), "arm")
-        self.assertTrue(self.runtime.status()["armed"])
-        self.assertFalse(self.runtime.status()["suppression"])
+        self.assertEqual(self.runtime.status()["audioVolume"], 30)
 
     async def test_failed_readiness_does_not_change_volume(self):
         self.runtime._camera_health = "unavailable"
@@ -540,22 +537,119 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.runtime.audio.set_volume.assert_not_awaited()
 
-    async def test_disarm_supersedes_slow_volume_application(self):
+    async def test_disarm_remains_responsive_during_volume_application(self):
         entered, release = asyncio.Event(), asyncio.Event()
 
-        async def set_volume():
+        async def set_volume(value):
             entered.set()
             await release.wait()
 
         self.runtime.audio.set_volume.side_effect = set_volume
-        arm = asyncio.create_task(self.runtime.execute("arm"))
-
-        await entered.wait()
-        await self.runtime.execute("disarm")
+        change = asyncio.create_task(self.runtime.execute("volume 50"))
+        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(self.runtime.execute("disarm"), 0.5)
         release.set()
 
-        self.assertEqual(await arm, "Command superseded")
+        self.assertEqual(await change, "volume 50")
         self.assertFalse(self.runtime.status()["armed"])
+
+    async def test_invalid_volume_never_touches_mixer_or_alarm_state(self):
+        self.runtime.controller.armed = True
+
+        for command in ("volume", "volume -1", "volume 101", "volume 1.5", "volume fifty", "volume 50 extra", "volume ５０"):
+            with self.subTest(command=command):
+                self.assertEqual(await self.runtime.execute(command), "Usage: /volume <0-100>")
+
+        self.runtime.audio.set_volume.assert_not_awaited()
+        self.assertTrue(self.runtime.status()["armed"])
+
+    async def test_volume_writes_are_serialized(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        values = []
+
+        async def set_volume(value):
+            values.append(value)
+
+            if value == 20:
+                entered.set()
+                await release.wait()
+
+        self.runtime.audio.set_volume.side_effect = set_volume
+        first = asyncio.create_task(self.runtime.execute("volume 20"))
+        await asyncio.wait_for(entered.wait(), 1)
+        second = asyncio.create_task(self.runtime.execute("volume 80"))
+        await asyncio.sleep(0)
+        self.assertEqual(values, [20])
+        release.set()
+
+        self.assertEqual(await asyncio.gather(first, second), ["volume 20", "volume 80"])
+        self.assertEqual(values, [20, 80])
+        self.assertEqual(self.runtime.status()["audioVolume"], 80)
+
+    async def test_volume_change_does_not_interrupt_playback(self):
+        started = asyncio.Event()
+
+        async def play(key, **kwargs):
+            kwargs["on_started"]()
+            started.set()
+            await asyncio.Event().wait()
+
+        self.runtime.audio.play.side_effect = play
+        await self.runtime.execute("alarm")
+        await asyncio.wait_for(started.wait(), 1)
+        task = self.runtime._audio_task
+
+        self.assertEqual(await self.runtime.execute("volume 50"), "volume 50")
+        self.assertIs(self.runtime._audio_task, task)
+        self.assertFalse(task.done())
+        self.assertTrue(self.runtime.status()["manual"])
+        self.assertEqual(self.runtime.status()["phase"], "alarm")
+
+    async def test_invalid_volume_does_not_supersede_pending_arm(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def ready(name):
+            entered.set()
+            await release.wait()
+
+        with patch.object(self.runtime, "_readiness", side_effect=ready):
+            arm = asyncio.create_task(self.runtime.execute("arm"))
+            await asyncio.wait_for(entered.wait(), 1)
+
+            self.assertEqual(await self.runtime.execute("volume invalid"), "Usage: /volume <0-100>")
+            release.set()
+
+            self.assertEqual(await arm, "arm")
+            self.assertTrue(self.runtime.status()["armed"])
+
+    async def test_initial_volume_is_applied_once_before_telegram(self):
+        for initial, error in ((25, None), (None, None), (25, ValueError("PCM missing"))):
+            with self.subTest(initial=initial, error=error):
+                runtime = Runtime(config())
+                runtime.config["audio"]["volume"] = initial
+                runtime.audio = Mock(set_volume=AsyncMock(side_effect=error), stop=AsyncMock())
+                runtime.vision = Mock(poll=Mock(return_value=None), stop=AsyncMock())
+                stop = asyncio.Event()
+
+                async def telegram(event):
+                    if initial is None:
+                        runtime.audio.set_volume.assert_not_awaited()
+                    else:
+                        runtime.audio.set_volume.assert_awaited_once_with(initial)
+
+                    self.assertEqual(runtime.status()["audioVolume"], initial if error is None else None)
+                    stop.set()
+                    await event.wait()
+
+                async def notifications(event):
+                    await event.wait()
+
+                runtime.telegram.run = telegram
+                runtime.notifications.run = notifications
+                await asyncio.wait_for(runtime.run(stop), 2)
+
+                if error is not None:
+                    self.assertIn("PCM missing", runtime.status()["lastAudioFailure"]["reason"])
 
     async def test_complete_fake_incident(self):
         await self.confirm()
@@ -909,6 +1003,10 @@ class ReadinessTests(unittest.TestCase):
         ):
             self.assertIn(
                 "Volume backend unavailable: amixer", check_readiness(settings)
+            )
+            self.assertNotIn(
+                "Volume backend unavailable: amixer",
+                check_readiness(settings, require_volume=False),
             )
 
         settings["audio"]["volume"] = None

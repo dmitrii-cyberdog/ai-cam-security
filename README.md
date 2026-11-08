@@ -97,11 +97,19 @@ and `RTSP_PATH`. The config loader assembles the RTSP URL and percent-encodes ra
 to use the system default ALSA device; a supplied value overrides it.
 
 Set `AUDIO_VOLUME` to an integer percentage from `0` to `100` to apply the device's
-`PCM` playback volume before every successful `/arm`. Leave it empty or unset to
-keep the current volume. Volume control requires `amixer` from `alsa-utils` and
+`PCM` playback volume once at service startup. Leave it empty or unset to
+keep the existing mixer volume at startup. Volume control requires `amixer` from `alsa-utils` and
 `AUDIO_DEVICE=default` or a device containing `CARD=`, such as
-`plughw:CARD=UACDemoV10,DEV=0`. A mixer error rejects the arm attempt without
-clearing suppression. Restart the service after changing the setting.
+`plughw:CARD=UACDemoV10,DEV=0`. A startup mixer error is logged and shown in
+`/status`; the service remains available for diagnostics. Restart after changing
+the initial setting. `/arm` does not apply volume or require `amixer`.
+
+Use `/volume 50` in Telegram to set volume immediately. Values from `0` (mute)
+through `100` are accepted, including while sound is playing or the camera is
+unavailable. A failed change reports the mixer error and keeps the previous
+reported value. It does not change protection, stop playback, or clear alarm
+suppression. Telegram changes are not written to environment files; restart
+reapplies `AUDIO_VOLUME` when configured.
 
 Folder layout:
 
@@ -133,8 +141,8 @@ without repeating the main language; missing secondary files are skipped.
 A `common/<key>.wav` file replaces all language versions for that key. Otherwise,
 a missing main-language file prevents readiness and arming.
 
-The public `.env` uses confidence `0.35`, English audio, no forced
-device volume and no periodic siren photos. The code fallback for confidence is
+The public `.env` uses confidence `0.35`, English audio, initial volume `25`
+and no periodic siren photos. The code fallback for confidence is
 `0.5`. Keep installation-specific preferences in a local override and restart
 after configuration changes.
 
@@ -187,10 +195,11 @@ explain how to resume automatic alarms with a successful `/arm`.
 | --- | --- |
 | `/status` | Protection, component/queue health, CPU temperature, service uptime, load averages, host memory, last frame age, audio selection and last failure |
 | `/photo` | Wait up to 5 seconds for a frame captured after the request and send it to the requesting chat; report unavailable if no fresh frame arrives |
-| `/arm` | Check camera/detector/audio readiness; apply configured volume, clear suppression and arm |
+| `/arm` | Check camera/detector/audio readiness, clear suppression and arm; keep volume unchanged |
 | `/disarm` | Disable automation and stop all playback |
 | `/alarm` | Manual siren, including while disarmed or RTSP is unavailable; needs WAV assets and aplay, leaves volume unchanged; at most 60 seconds |
 | `/stop` | Stop playback, keep armed mode, reset siren allowance and require fresh confirmation |
+| `/volume 50` | Set volume to 50%; accepts integers 0–100 and keeps alarm/protection state unchanged |
 | `/help` | Command summary |
 
 Defaults: confirm for 2 seconds by day and 3 seconds from 22:00 to 06:00 in
@@ -210,8 +219,10 @@ clock; last frame age remains visible after camera loss. No frame ever received
 is shown explicitly. The kernel documents the [thermal-zone units](https://kernel.org/doc/html/v5.7/driver-api/thermal/sysfs-api.html)
 and [memory fields](https://www.kernel.org/doc/html/latest/filesystems/proc.html).
 
-Status shows the effective audio device, the configured volume applied only on
-`/arm`, and the latest audio failure with its UTC timestamp. That failure is
+Status shows the effective audio device, configured initial volume, last
+successfully applied volume, and latest audio failure with its UTC timestamp.
+The applied volume is unknown until the service successfully sets it; status
+does not read back mixer values changed by another application. That failure is
 history retained until another failure or restart, even after recovery. A ready
 asset/backend check does not prove the speaker can play. Manual alarms do not
 require camera/model/detector readiness or `amixer`; camera faults leave an

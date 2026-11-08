@@ -116,7 +116,7 @@ to use the system default ALSA device. To override it, set a verified ALSA devic
 (for example `plughw:CARD=<actual-card>,DEV=0`). Use `aplay -l`/`aplay -L` to inspect actual devices. Verify access as
 the service account without relying on an interactive desktop audio session.
 
-To set device volume when arming, put an integer percentage in `.env.prod.local`:
+To set initial device volume at service startup, put an integer percentage in `.env.prod.local`:
 
 ```dotenv
 AUDIO_DEVICE=plughw:CARD=UACDemoV10,DEV=0
@@ -124,8 +124,8 @@ AUDIO_VOLUME=75
 ```
 
 Use the verified card name for your speaker. `AUDIO_VOLUME` accepts `0` to `100`;
-empty or unset leaves volume unchanged. Each successful `/arm` sets the card's
-`PCM` playback volume through `amixer` before arming. With volume configured,
+empty or unset leaves volume unchanged at startup. The service sets the card's
+`PCM` playback volume through `amixer` once before Telegram starts. With volume configured,
 `AUDIO_DEVICE` must be `default` or contain `CARD=`. Verify that the service account
 can read the card's `PCM` mixer control:
 
@@ -134,8 +134,16 @@ sudo -u ai-cam-security amixer -c UACDemoV10 sget PCM
 ```
 
 Restart after configuration changes. A missing mixer control, permission error or
-volume-command failure rejects the arm attempt and preserves suppression.
-Manual `/alarm` does not apply `AUDIO_VOLUME`.
+volume-command failure is logged and retained in status; diagnostics continue.
+Neither `/arm` nor manual `/alarm` reapplies `AUDIO_VOLUME` or requires `amixer`.
+
+Use `/volume 50` to change volume from Telegram without a restart. It accepts
+integers from `0` (mute) to `100`, works without RTSP and during playback, and
+does not arm/disarm, stop sound or clear suppression. The reply confirms success
+only after the mixer command succeeds. Changes are not persisted to env files;
+restart reapplies the configured initial value. `/volume` or its keyboard button
+shows usage. Status distinguishes the initial value from the last successfully
+applied percentage; unknown means the service has not set it, not a mixer readback.
 
 ### Diagnosing audio failures
 
@@ -162,7 +170,7 @@ to a USB speaker. Default PCM playback and the default mixer may route
 differently, especially between a desktop user and the service account. Compare
 the reported backend reason, card inventory, account/group permissions and
 systemd restrictions before choosing an explicit device. A missing `PCM`
-control rejects configured-volume `/arm`, even if playback itself would work.
+control prevents startup volume initialization and `/volume` changes, even if playback itself would work.
 The tracked production volume is 100; local files/process variables may override
 it. Verify effective settings rather than assuming the tracked defaults apply.
 
@@ -290,7 +298,7 @@ latency for each row. These tests **have not been performed**.
 
 | Check | Expected result |
 | --- | --- |
-| Startup/status; unauthorized/private/group/edited commands | Disarmed; startup notice and status reply include all six keyboard commands; Telegram command menu registered; only allowlisted private original fresh commands execute |
+| Startup/status; unauthorized/private/group/edited commands | Disarmed; startup notice and status reply include all command buttons; Telegram command menu registered; only allowlisted private original fresh commands execute |
 | Day/night entry and stationary presence | Confirmation at 2/3 seconds with >=3 distinct frames; frozen profile per candidate |
 | Complete incident | Recognized photo, still-there text, activated photo, deactivated photo in order |
 | Leave during warning or each countdown key | Finish every warning/countdown file; confirmed absence at the end skips the siren and activated event |

@@ -28,7 +28,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
             "camera": "healthy", "detector": "healthy", "audio": "ready", "telegram": "healthy",
             "notifications": {"queued_count": 1, "retained_image_bytes": 1048576, "dropped_count": 2, "unreported_drops": 1},
             "token": "123:secret-token",
-            "audioDevice": "default", "audioVolume": None, "lastAudioFailure": None,
+            "audioDevice": "default", "audioVolume": None, "initialAudioVolume": None, "lastAudioFailure": None,
             "system": {"cpuTemperatureCelsius": None, "loadAverage": None, "memoryUsedMiB": None, "memoryTotalMiB": None, "uptimeSeconds": 0, "lastFrameAgeSeconds": None},
         }
         self.service = TelegramService(self.config, self.execute, lambda: self.status, self.get_frame)
@@ -74,6 +74,66 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
         for name, value in overrides.items():
             setattr(result, name, value)
         return result
+
+    async def test_volume_command_forwards_percentage_and_reports_applied_value(self):
+        for index, (text, command) in enumerate((
+            ("/volume 50", "volume 50"),
+            ("/volume@camera_bot 0", "volume 0"),
+            ("/volume   100", "volume 100"),
+        ), 1):
+            self.execute.reset_mock()
+            self.execute.return_value = command
+            update = self.update(update_id=index)
+            update.message.text = text
+
+            await self.service._handle(update, None)
+
+            self.execute.assert_awaited_once_with(command)
+            self.assertIn(f"Volume set to {command.split()[1]}%", update.message.reply_text.call_args.args[0])
+
+    async def test_volume_usage_and_backend_failure_are_visible(self):
+        for index, (text, result) in enumerate((
+            ("/volume", "Usage: /volume <0-100>"),
+            ("🔊 Set volume", "Usage: /volume <0-100>"),
+            ("/volume 101", "Usage: /volume <0-100>"),
+            ("/volume 50", "Cannot set volume: <PCM> & 123:secret-token"),
+        ), 1):
+            update = self.update(update_id=index)
+            update.message.text = text
+            self.execute.return_value = result
+
+            await self.service._handle(update, None)
+
+            reply = update.message.reply_text.call_args.args[0]
+            self.assertIn("Usage:" if "Usage" in result else "&lt;PCM&gt; &amp;", reply)
+            self.assertNotIn("secret-token", reply)
+
+    async def test_volume_command_preserves_authorization_and_duplicate_checks(self):
+        blocked = self.update(effective_user=SimpleNamespace(id=100))
+        blocked.message.text = "/volume 50"
+
+        await self.service._handle(blocked, None)
+        self.execute.assert_not_awaited()
+
+        update = self.update(update_id=2)
+        update.message.text = "/volume 50"
+        self.execute.return_value = "volume 50"
+
+        await self.service._handle(update, None)
+        await self.service._handle(update, None)
+
+        self.execute.assert_awaited_once_with("volume 50")
+
+    async def test_status_distinguishes_initial_from_last_applied_volume(self):
+        self.status.update(initialAudioVolume=25, audioVolume=50)
+        reply = self.service._status_reply()
+
+        self.assertIn("Initial volume: 25%", reply)
+        self.assertIn("Last applied volume: 50%", reply)
+
+        self.status["audioVolume"] = None
+
+        self.assertIn("Last applied volume: Unknown", self.service._status_reply())
 
     def application(self):
         app = Mock(
@@ -315,7 +375,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
     async def test_keyboard_titles_execute_commands_and_show_status_and_help(self):
         for index, (name, title) in enumerate(COMMAND_TITLES.items()):
             self.execute.reset_mock()
-            self.execute.return_value = name
+            self.execute.return_value = "Usage: /volume <0-100>" if name == "volume" else name
             update = self.update(update_id=index + 1)
             update.message.text = title
 

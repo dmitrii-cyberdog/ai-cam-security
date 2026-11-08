@@ -280,6 +280,16 @@ class AudioTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(spawn.call_args.args, ("amixer", "-q", "sset", "PCM", "playback", "0%"))
 
+    async def test_explicit_volume_overrides_initial_value_without_changing_config(self):
+        self.settings["volume"] = 25
+        process = Mock(returncode=0, stderr=None, wait=AsyncMock(return_value=0))
+
+        with patch("app.services.audio.asyncio.create_subprocess_exec", return_value=process) as spawn:
+            await AudioPlayer(self.config).set_volume(50)
+
+        self.assertEqual(spawn.call_args.args[-1], "50%")
+        self.assertEqual(self.settings["volume"], 25)
+
     async def test_volume_rejects_device_without_card_identity(self):
         self.settings["volume"] = 75
         self.settings["device"] = "custom-output"

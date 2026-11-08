@@ -26,6 +26,23 @@ freshness requirements, suppression/recovery, and alarm timing remain as before.
 Hardware routing, physical sound and Pi metrics still need supervised acceptance;
 this amendment does not authorize deployment or live sound tests.
 
+## Initial volume and Telegram control amendment (2026-11-08)
+
+The user's requested [Telegram volume change](../plans/2026-11-08-telegram-volume.md)
+supersedes earlier per-arm volume semantics. AUDIO_VOLUME is applied once before
+Telegram starts; unset leaves the mixer unchanged. `/volume 50` changes volume
+immediately, accepts integers 0–100, and preserves protection, suppression and
+playback state. Mixer writes are serialized independently of stop/disarm.
+
+Successful changes are reported only after mixer success. Failures retain the
+last successfully applied percentage, return/store the backend reason, and do
+not fail playback. Initial failures leave the disarmed service available for
+diagnostics. `/arm` keeps current volume and does not require amixer. Offline
+startup readiness still checks configured initial-volume dependencies. Status
+distinguishes initial configuration from the last value the service applied;
+unknown is explicit and no hardware readback is claimed. Runtime changes are not
+persisted: restart applies the configured initial value again when present.
+
 ## Goal and confirmed requirements
 
 Run a local person-detection and audio alarm service on a Raspberry Pi 5 with
