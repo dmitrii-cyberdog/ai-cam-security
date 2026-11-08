@@ -3,7 +3,7 @@ import sys
 import tempfile
 import unittest
 import wave
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import AsyncMock, Mock, patch
 
 from app.services.audio import AudioPlayer, resolve_sequence
@@ -61,6 +61,24 @@ class AudioTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.services.audio.asyncio.create_subprocess_exec", side_effect=PermissionError("speaker access denied")):
             with self.assertRaisesRegex(ValueError, "audio_spawn_failed.*speaker access denied"):
                 await AudioPlayer(self.config).play("alarm")
+
+    async def test_windows_asset_diagnostics_use_portable_path(self):
+        root = PureWindowsPath("C:/sounds")
+        asset = root / "common" / "alarm.wav"
+        process = Mock(returncode=1, stderr=None, wait=AsyncMock(return_value=1))
+
+        with (
+            patch("app.services.audio.resolve_sequence", return_value={"alarm": (asset,)}),
+            patch("app.services.audio.Path") as path_type,
+            patch("app.services.audio.asyncio.create_subprocess_exec", return_value=process) as spawn,
+        ):
+            path_type.return_value.resolve.return_value = root
+
+            with self.assertRaises(ValueError) as failure:
+                await AudioPlayer(self.config).play("alarm")
+
+        self.assertIn("asset=common/alarm.wav", str(failure.exception))
+        self.assertEqual(spawn.call_args.args[-1], r"C:\sounds\common\alarm.wav")
 
     async def test_mixer_stderr_reports_missing_pcm(self):
         self.settings["volume"] = 25

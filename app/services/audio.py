@@ -186,7 +186,7 @@ class AudioPlayer:
 
                     device = self.config["audio"]["device"]
                     asset = path.relative_to(Path(self.config["audio"]["soundsFolder"]).resolve())
-                    context = f"device={device}; key={key}; asset={asset}"
+                    context = f"device={device}; key={key}; asset={asset.as_posix()}"
                     tail = bytearray()
 
                     logger.debug("Audio asset playback requested", {
