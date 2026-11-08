@@ -4,8 +4,8 @@ Local RTSP person detection and multilingual audio alarms with authorized Telegr
 
 Experimental Raspberry Pi camera alarm, licensed under [Apache-2.0](LICENSE).
 Pinned NanoDet models are included with [third-party attribution](NOTICE).
-Supply your own licensed PCM WAV recordings before enabling playback; sounds
-and camera footage are kept local and are excluded from the public repository.
+Default English PCM WAV recordings and a common alarm are bundled.
+Additional recordings and camera footage are kept local and excluded from the public repository.
 
 The service starts disarmed. One isolated worker captures the newest camera frame
 and runs OpenCV NanoDet; the asyncio parent controls audio, incidents and Telegram.
@@ -111,7 +111,7 @@ Folder layout:
 
 Model and sound paths resolve from the project root, independently of `STORAGE_FOLDER`.
 
-`cz` (Czech) and `en` (English) are just the default language choices. You can
+`en` (English) is the default language. You can
 use any language: create `system/sounds/<language>/` and put your PCM WAV files
 there, using the filenames in `AUDIO_SEQUENCE` (`first_warning.wav`,
 `countdown_1.wav`, `countdown_2.wav`, `countdown_3.wav`, and `alarm.wav`). Directory
@@ -126,12 +126,14 @@ AUDIO_LANGUAGES=fr,en
 ```
 
 `AUDIO_MAIN_LANGUAGE` selects the required language, played first for each
-sound key. Other `AUDIO_LANGUAGES` follow in listed order,
+sound key. When unset, it defaults to the sole `AUDIO_LANGUAGES` item, or `en`
+when multiple languages are configured. An explicit value overrides this default.
+Other `AUDIO_LANGUAGES` follow in listed order,
 without repeating the main language; missing secondary files are skipped.
 A `common/<key>.wav` file replaces all language versions for that key. Otherwise,
 a missing main-language file prevents readiness and arming.
 
-The public `.env` uses confidence `0.35`, Czech followed by English, no forced
+The public `.env` uses confidence `0.35`, English audio, no forced
 device volume and no periodic siren photos. The code fallback for confidence is
 `0.5`. Keep installation-specific preferences in a local override and restart
 after configuration changes.

@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.config._ import PROJECT_ROOT, load_config
+from app.services.audio import resolve_sequence
 
 #
 #
@@ -190,7 +191,8 @@ class ConfigTests(unittest.TestCase):
             )
 
     def test_audio_defaults_and_invalid_names(self):
-        self.assertEqual(load_config(root=self.root)["audio"]["mainLanguage"], "cz")
+        self.assertEqual(load_config(root=self.root)["audio"]["mainLanguage"], "en")
+        self.assertEqual(load_config(root=self.root)["audio"]["languages"], ["en"])
         for key, value in (
             ("AUDIO_MAIN_LANGUAGE", ""),
             ("AUDIO_MAIN_LANGUAGE", "../en"),
@@ -201,6 +203,42 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(key=key), patch.dict(os.environ, {key: value}):
                 with self.assertRaisesRegex(ValueError, key):
                     load_config(root=self.root)
+
+    def test_single_audio_language_becomes_default_main_language(self):
+        (self.root / ".env").write_text(
+            (PROJECT_ROOT / ".env").read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
+        with patch.dict(os.environ, {"AUDIO_LANGUAGES": " cz "}):
+            self.assertEqual(load_config(root=self.root)["audio"]["mainLanguage"], "cz")
+
+    def test_audio_main_language_override_and_multilingual_fallback(self):
+        for values, expected in (
+            ({"AUDIO_LANGUAGES": "fr", "AUDIO_MAIN_LANGUAGE": "cz"}, "cz"),
+            ({"AUDIO_LANGUAGES": "cz,fr"}, "en"),
+        ):
+            with self.subTest(values=values), patch.dict(os.environ, values):
+                self.assertEqual(
+                    load_config(root=self.root)["audio"]["mainLanguage"], expected
+                )
+
+    def test_bundled_sounds_resolve_with_default_audio_settings(self):
+        config = load_config(root=self.root)
+        config["audio"]["soundsFolder"] = PROJECT_ROOT / "system/sounds"
+
+        paths = [
+            path.relative_to(config["audio"]["soundsFolder"]).as_posix()
+            for files in resolve_sequence(config).values()
+            for path in files
+        ]
+
+        self.assertEqual(paths, [
+            "en/first_warning.wav",
+            "en/countdown_1.wav",
+            "en/countdown_2.wav",
+            "en/countdown_3.wav",
+            "common/alarm.wav",
+        ])
 
     def test_audio_device_defaults_when_missing_or_empty(self):
         self.assertEqual(load_config(root=self.root)["audio"]["device"], "default")

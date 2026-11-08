@@ -87,29 +87,27 @@ selected runtime artifact at `system/models/person.onnx`. Runtime never download
 models. Offline readiness accepts either pinned candidate hash; this does not
 mean its Pi performance/accuracy gate has passed.
 
-Supply PCM WAV files that you have permission to use. Audio recordings are not
-distributed with the public repository; local WAV files and backups are ignored.
-The following layout illustrates the default Czech and English choices:
+English warnings/countdowns and a common alarm are bundled with the repository.
+Additional local WAV files and backups are ignored. Supply recordings that you
+have permission to use when adding languages. The bundled layout is:
 
 ```text
 system/sounds/common/alarm.wav
-system/sounds/cz/first_warning.wav
-system/sounds/cz/countdown_1.wav
-system/sounds/cz/countdown_2.wav
-system/sounds/cz/countdown_3.wav
 system/sounds/en/first_warning.wav
 system/sounds/en/countdown_1.wav
 system/sounds/en/countdown_2.wav
 system/sounds/en/countdown_3.wav
 ```
 
-`cz` and `en` are defaults, not a fixed list of supported languages. To use any
+`en` is the default, not a fixed list of supported languages. To use any
 other language, create `system/sounds/<language>/` with the same WAV filenames
 and set `AUDIO_MAIN_LANGUAGE` and `AUDIO_LANGUAGES` in `.env.prod.local` to your
-directory names. Use letters, numbers, underscores and hyphens in those names.
+directory names. With a single `AUDIO_LANGUAGES` item, `AUDIO_MAIN_LANGUAGE` can
+be omitted and defaults to that language; with multiple items it defaults to `en`.
+Use letters, numbers, underscores and hyphens in those names.
 See the [French configuration example](../README.md#configuration).
 
-Default playback: Czech then English for each key, then common alarm. A common
+Default playback: English for each key, then common alarm. A common
 file takes precedence over language versions. Warning/countdown files play once;
 the alarm WAV repeats throughout each siren period. Without a common file, the
 main-language file is required; missing secondary-language files are skipped. Files must resolve inside

@@ -55,6 +55,11 @@ volume/**
 
 system/samples/
 system/sounds/**/*.wav
+!system/sounds/common/alarm.wav
+!system/sounds/en/first_warning.wav
+!system/sounds/en/countdown_1.wav
+!system/sounds/en/countdown_2.wav
+!system/sounds/en/countdown_3.wav
 *.bak
 
 # Local agent session artifacts

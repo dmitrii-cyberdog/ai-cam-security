@@ -165,7 +165,12 @@ def load_config(
             raise ValueError(f"Invalid {name}")
         return items
 
-    main_language = values.get("AUDIO_MAIN_LANGUAGE", "cz") or ""
+    languages = names("AUDIO_LANGUAGES", "en")
+
+    main_language = values.get(
+        "AUDIO_MAIN_LANGUAGE", languages[0] if len(languages) == 1 else "en"
+    ) or ""
+
     if not re.fullmatch(r"[A-Za-z0-9_-]+", main_language):
         raise ValueError("Invalid AUDIO_MAIN_LANGUAGE")
     sequence = names(
@@ -186,7 +191,7 @@ def load_config(
     config["audio"] = {
         "soundsFolder": asset_path("AUDIO_SOUNDS_FOLDER", "system/sounds"),
         "mainLanguage": main_language,
-        "languages": names("AUDIO_LANGUAGES", "en,cz"),
+        "languages": languages,
         "sequence": sequence,
         "device": device,
         "volume": (
