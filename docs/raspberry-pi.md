@@ -298,6 +298,18 @@ the siren, up to three total periods. The alarm file loops as needed, with no
 repeat of warnings or countdowns between periods. Stop/disarm and faults still
 interrupt playback. See [the behavior and settings](../README.md#commands-and-behavior).
 
+## Optional example: camera network isolation
+
+An alternative deployment could put an RTSP-only camera on a dedicated VLAN or
+SSID with router-enforced isolation. Router rules could allow camera access
+from the Raspberry Pi and selected administration devices while blocking other
+home-LAN clients and Internet access to the camera's RTSP port.
+
+A remote client could connect through an encrypted tunnel ending on the Pi.
+The Pi-to-camera hop would still use plain RTSP inside the isolated network;
+the tunnel protects only the traffic carried through it. This is an optional
+deployment example, not a requirement for the existing home-LAN setup.
+
 ## 3. Offline checks and measurement gate
 
 ```sh

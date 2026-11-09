@@ -93,6 +93,10 @@ diagnostics; malformed supplied values fail with safe field names.
 Camera connection settings are split into `RTSP_LOGIN`, `RTSP_PASSWORD` (the
 camera verification code), `RTSP_HOST` (IP address or hostname), `RTSP_PORT`,
 and `RTSP_PATH`. The config loader assembles the RTSP URL and percent-encodes raw credentials once.
+
+For an alternative network setup, see the optional
+[camera-network isolation example](docs/raspberry-pi.md#optional-example-camera-network-isolation).
+
 `AUDIO_DEVICE` selects the Raspberry Pi/Linux speaker output. Leave it empty or unset
 to honor the system default ALSA device; a supplied value overrides it. The app
 does not select another output when the configured/default device fails.
