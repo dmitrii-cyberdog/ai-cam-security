@@ -3,5 +3,6 @@
     "editor.defaultFormatter": "ms-python.black-formatter"
   },
   "python.analysis.typeCheckingMode": "off",
-  "python.analysis.extraPaths": []
+  "python.analysis.extraPaths": [],
+  "mypy.runUsingActiveInterpreter": true
 }
