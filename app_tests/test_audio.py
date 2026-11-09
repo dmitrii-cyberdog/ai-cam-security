@@ -90,15 +90,31 @@ class AudioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["mixerSwitches"], ["on", "off"])
         self.assertIn("aplay unavailable", report["inspectionErrors"])
 
-    async def test_inspection_reads_bounded_output_and_preserves_backend_errors(self):
+    async def test_inspection_preserves_output_line_endings(self):
         self.inspection_patch.stop()
         player = AudioPlayer(self.config)
 
-        text = await player._read_command([sys.executable, "-c", "print('mixer contents')"])
-        self.assertEqual(text, "mixer contents\n")
+        for output, expected in (
+            (b"mixer contents\n", "mixer contents\n"),
+            (b"mixer contents\r\n", "mixer contents\r\n"),
+        ):
+            with self.subTest(output=output):
+                text = await player._read_command([
+                    sys.executable, "-c", f"import sys; sys.stdout.buffer.write({output!r})",
+                ])
+
+                self.assertEqual(text, expected)
+
+    async def test_inspection_rejects_oversized_output(self):
+        self.inspection_patch.stop()
+        player = AudioPlayer(self.config)
 
         with self.assertRaisesRegex(ValueError, "inspection output exceeds"):
             await player._read_command([sys.executable, "-c", "print('x' * 200000)"])
+
+    async def test_inspection_preserves_backend_errors(self):
+        self.inspection_patch.stop()
+        player = AudioPlayer(self.config)
 
         with self.assertRaisesRegex(ValueError, "exit 3.*no mixer"):
             await player._read_command([sys.executable, "-c", "import sys; sys.stderr.write('no mixer'); sys.exit(3)"])

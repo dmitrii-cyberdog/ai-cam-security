@@ -15,7 +15,7 @@ class ConfigTests(unittest.TestCase):
     def setUp(self) -> None:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        self.root = Path(directory.name)
+        self.root = Path(directory.name).resolve()
         environment = patch.dict(os.environ, {}, clear=True)
         environment.start()
         self.addCleanup(environment.stop)
