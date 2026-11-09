@@ -208,9 +208,50 @@ default once on each host; the app does not infer which physical speaker you
 intend to use. Desktop audio-manager defaults and a headless system account's
 ALSA defaults may differ.
 
-For the reported headless Pi, the USB card is `UACDemoV10`, while cards 0/1 are
-HDMI. After reviewing existing host settings, a system-wide ALSA example in
-`/etc/asound.conf` is:
+On 2026-11-09, the operator confirmed that configuring the system default as
+described below resolved this playback failure on the reported Pi:
+
+```text
+audio_exit_1; device=default; key=alarm; asset=common/alarm.wav: aplay: main:850: audio open error: Unknown error 524
+```
+
+The default mixer identified `vc4hdmi0` (HDMI card 0), with no simple mixer
+controls. The USB speaker was `UACDemoV10` (card 2), with a playback-volume
+`PCM` control and playback switches on. Neither `/etc/asound.conf` nor the
+operator's `~/.asoundrc` existed. Missing HDMI volume controls explained the
+separate startup volume failure; playback failed while opening the default
+device, before reading the WAV. This case does not establish the cause of every
+ALSA error 524.
+
+Run the following commands as the account running the app, from the project
+directory. A personal login and a dedicated service account may have different
+ALSA defaults. First inspect the existing configuration without playing sound:
+
+```sh
+id
+aplay -L
+cat /etc/asound.conf "$HOME/.asoundrc"
+amixer -c UACDemoV10 scontents
+```
+
+Missing-file errors from `cat` mean those override files do not exist. Substitute
+your actual USB card name on another host. With approval for audible output,
+test that card directly; this plays one second of the bundled alarm:
+
+```sh
+aplay -D plughw:CARD=UACDemoV10,DEV=0 -d 1 system/sounds/common/alarm.wav
+```
+
+If direct playback fails, investigate that error before changing the default.
+If it works and this is the intended speaker, review any existing configuration
+and approve the system-wide routing change before editing `/etc/asound.conf`:
+
+```sh
+sudoedit /etc/asound.conf
+```
+
+For this Pi, create the following configuration, or merge it with existing
+settings rather than replacing unrelated configuration:
 
 ```text
 pcm.!default {
@@ -223,14 +264,26 @@ ctl.!default {
 }
 ```
 
-This is an example for that Pi, not a file the application creates or replaces.
-Review/merge existing audio configuration and approve host changes separately;
-other hosts use their own card names or audio-manager defaults. ALSA documents
+This configuration is specific to that Pi; the application does not create or
+replace host files. Other hosts use their own card names or audio-manager
+defaults. ALSA documents
 [system-wide and per-user defaults](https://www.alsa-project.org/wiki/Asoundrc).
 Configuring both playback and control defaults keeps these aliases pointed at
-the same card. Verify as the service account using `/audio_status`, and perform
-an audible check only with approval. ALSA error 524 remains a backend/device-open
-failure to investigate; listing a USB card does not prove it works.
+the same card. Leave `AUDIO_DEVICE` empty, unset or explicitly `default`.
+
+Verify as the account running the app. The second command plays another second
+of alarm and requires approval for audible output:
+
+```sh
+amixer info
+aplay -D default -d 1 system/sounds/common/alarm.wav
+```
+
+`amixer info` should now identify `UACDemoV10`. Retry `/alarm` and `/audio_status`;
+the latter should report the USB mixer and `PCM` volume control. Its last-error
+history can still contain the earlier failure after playback succeeds. The
+operator reported working playback after this change; no agent-run live Pi
+test was performed. Listing a USB card alone does not prove sound output.
 
 Automatic alarms work whenever armed, day and night. The first warning starts
 after 2 seconds of confirmed presence by day or 3 seconds at night (22:00–06:00,

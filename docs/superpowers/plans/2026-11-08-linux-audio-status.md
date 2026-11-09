@@ -48,7 +48,8 @@
 - Hung or verbose queries must not block stop/disarm, leak processes or leave partial discovery authoritative.
 - Audio status must share normal Telegram authorization and redact before truncating external text.
 
-Live Pi device/default/mixer validation remains pending.
+Live Pi device/default/mixer validation was pending at implementation time;
+see the operator follow-up below.
 
 
 ## Implementation and verification record
@@ -79,5 +80,17 @@ sound tests were performed.
 - Mypy: all four targets passed, Windows/Linux × Python 3.11/3.14, 16 files each.
 - Strict Poetry validation and whitespace checks passed. The existing Telegram
   retry_after deprecation warning remains.
-- Live Pi mixer/default routing and audible output remain unverified. Inventory
+- At implementation time, live Pi mixer/default routing and audible output were unverified. Inventory
   presence alone does not establish that the original error 524 is resolved.
+
+## Operator follow-up: 2026-11-09
+
+The operator supplied diagnostics showing the default mixer on `vc4hdmi0`, no
+simple HDMI mixer controls, and a USB `UACDemoV10` card with a playback-volume
+`PCM` control. Neither `/etc/asound.conf` nor the operator's `~/.asoundrc` existed.
+After following the system-wide default PCM/control configuration for USB, the
+operator confirmed playback works while retaining the app's default-device
+policy. This is operator-reported success on that Pi, not an agent-run live
+test or a universal diagnosis for error 524. The reproducible diagnostic,
+configuration and playback checks are documented in the
+[Pi default-routing guide](../../raspberry-pi.md#keeping-application-defaults-portable-across-linux-hosts).

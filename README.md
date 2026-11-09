@@ -96,6 +96,8 @@ and `RTSP_PATH`. The config loader assembles the RTSP URL and percent-encodes ra
 `AUDIO_DEVICE` selects the Raspberry Pi/Linux speaker output. Leave it empty or unset
 to honor the system default ALSA device; a supplied value overrides it. The app
 does not select another output when the configured/default device fails.
+If the Pi reports `audio open error: Unknown error 524`, follow the
+[ALSA default routing fix](docs/raspberry-pi.md#keeping-application-defaults-portable-across-linux-hosts).
 
 Set `AUDIO_VOLUME` to an integer percentage from `0` to `100` to apply the device's
 system-wide playback volume once at service startup. Leave it empty or unset to
