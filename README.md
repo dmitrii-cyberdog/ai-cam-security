@@ -1,370 +1,86 @@
 # ai-cam-security
 
-Local RTSP person detection and multilingual audio alarms with authorized Telegram control.
+RTSP person detection with local audio alarms and Telegram control, built for Raspberry Pi 5.
+Detection runs locally using OpenCV NanoDet. English warnings, a siren and pinned models are included;
+additional languages use your own WAV recordings.
 
-Experimental Raspberry Pi camera alarm, licensed under [Apache-2.0](LICENSE).
-Pinned NanoDet models are included with [third-party attribution](NOTICE).
-Default English PCM WAV recordings and a common alarm are bundled.
-Additional recordings and camera footage are kept local and excluded from the public repository.
+**Experimental: hardware acceptance is pending.** Complete the [Pi checks](docs/raspberry-pi.md)
+before unattended use. Every restart starts **disarmed**.
 
-The service starts disarmed. One isolated worker captures the newest camera frame
-and runs OpenCV NanoDet; the asyncio parent controls audio, incidents and Telegram.
-Day/night confirmation, confirmed absence and stale-camera handling use distinct
-fresh frames. Telegram outages do not stop local protection.
+## Quick start
 
-**Hardware acceptance is pending.** Preliminary Pi day/night benchmarks are recorded in
-the measurement report; accuracy acceptance, live RTSP latency and speaker
-audibility checks remain open. Complete the
-[Pi guide](docs/raspberry-pi.md) and [measurement gate](docs/benchmarks/pi5-detection.md)
-before unattended operation.
-
-## Setup and run
-
-Use Python 3.11–3.14 and Poetry 2.x. For local development, run from the project root:
-
-Copy [`.env`](.env) to `.env.local` (or `.env.prod.local` for deployment) and set
-your camera credentials, Telegram bot token, allowed user IDs and notification
-chat ID in that ignored copy. The public defaults have no credentials or IDs.
-See the [Pi guide](docs/raspberry-pi.md) for the required WAV files and backends.
+Requires Python 3.11–3.14 and Poetry 2.x. Audio playback targets Raspberry Pi/Linux with `alsa-utils`.
+Run from the project root:
 
 ```sh
 poetry install
+```
+
+Copy [`.env`](.env) to `.env.local`. Set `RTSP_LOGIN`, `RTSP_PASSWORD`, `RTSP_HOST`,
+`TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS` and `TELEGRAM_CHAT_ID` in that private copy.
+Allowed user IDs are comma-separated numbers; commands work only in authorized private chats.
+
+```sh
 poetry run ai-cam-security --check
+poetry run ai-cam-security --check-ready
 poetry run ai-cam-security
 ```
 
-This installs runtime dependencies and development tools, including `mypy`.
-For Raspberry Pi deployment, follow the [Pi guide](docs/raspberry-pi.md), which uses:
+`--check` validates configuration and storage. `--check-ready` also checks credentials,
+models, WAVs and installed backends. Both are offline; neither tests live hardware or Telegram.
+Stop with Ctrl+C. Use `/status`, verify camera and audio, then `/arm` to enable automatic alarms.
 
-```sh
-POETRY_VIRTUALENVS_IN_PROJECT=true poetry install --only main
-```
+For deployment, follow the [Raspberry Pi guide](docs/raspberry-pi.md).
 
-The Pi installation requires `.venv` in the project root for the systemd unit;
-`--only main` installs runtime dependencies. The `poetry run` commands work with
-either installation; use `--env prod` to load the production configuration.
+## Telegram commands
 
-The startup check validates configuration and creates the storage directory, then
-exits. `poetry run ai-cam-security --check-ready` additionally checks local assets,
-the pinned model hash, credentials and installed backends; it exits nonzero when
-setup is incomplete. Both commands are offline. Neither proves live readiness.
+| Command | Action |
+| --- | --- |
+| `/status` | Protection, camera, audio and host health |
+| `/audio_status` | Audio devices, mixer, volume and last failure |
+| `/photo` | Request a fresh camera image |
+| `/arm` | Check readiness, clear suppression and enable automatic alarms |
+| `/disarm` | Disable automatic alarms and stop playback |
+| `/alarm` | Play a manual siren for up to 60 seconds, even while disarmed |
+| `/stop` | Stop playback; keep armed mode and require fresh detection confirmation |
+| `/volume 50` | Set system playback volume, from 0 to 100 |
+| `/help` | Show commands |
 
-Alternative entry point:
+## Alarm behavior
 
-```sh
-poetry run python -m app --env dev
-```
+Confirmed presence starts a warning and countdown. These finish even if the person leaves.
+A fresh detection after the countdown starts the siren; confirmed absence skips it.
+Each siren period finishes before checking absence, up to three 60-second periods by default.
+`/stop`, `/disarm` and faults interrupt automatic playback.
 
-Stop with Ctrl+C. SIGINT and SIGTERM request a clean shutdown.
-
-The console command is named `ai-cam-security` to avoid the Windows shell's
-built-in `start` command.
+Camera loss stops automatic audio; recovery requires fresh confirmation. Audio faults require
+successful `/arm` to resume automatic alarms. Manual `/alarm` works without the camera.
+An Internet outage leaves already armed local protection running while the camera stays reachable;
+Telegram control and notifications need connectivity. A full restart still starts disarmed.
 
 ## Configuration
 
-Configuration files are resolved relative to the project root. Values load in this
-order, with later sources overriding earlier ones:
+[`.env`](.env) lists settings. Load order, with later values overriding earlier ones:
+`.env`, `.env.local`, `.env.<environment>`, `.env.<environment>.local`, process environment.
+Select an environment with `--env prod` (or `ENV`); use `.env.prod.local` for private production values.
+Restart after configuration changes. Paths resolve from the project root.
 
-1. `.env`
-2. `.env.local`
-3. `.env.<environment>`
-4. `.env.<environment>.local`
-5. Process environment variables
+- **Detection:** confidence, day/night confirmation, absence timing and optional siren photos.
+- **Audio:** `AUDIO_DEVICE` selects an ALSA output; empty uses the system default.
+  `AUDIO_VOLUME` sets startup mixer volume; Telegram volume changes do not persist across restarts.
+- **Languages:** add `system/sounds/<language>/` with the WAV names from `AUDIO_SEQUENCE`,
+  then set `AUDIO_MAIN_LANGUAGE` and `AUDIO_LANGUAGES`. Common WAVs override language versions;
+  main-language files are required, missing secondary files are skipped.
 
-Select the environment with `--env dev` / `-e dev` or the `ENV` environment
-variable. The CLI selection takes precedence. With neither set, only the two base
-files are loaded. Imports do not parse arguments or load configuration.
+Keep credentials, camera footage and additional recordings out of commits.
+Logs are JSON lines on stdout; incident photos are held in memory and sent to Telegram.
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `DEBUG` | `0` | Enables DEBUG logs unless LOG_LEVEL is set. Accepts 0/1, true/false, yes/no, on/off. |
-| `LOG_LEVEL` | `INFO`, or `DEBUG` with debug enabled | Standard Python logging level. |
-| `STORAGE_FOLDER` | `volume` | Uploaded/generated content; relative paths resolve from the project root. |
+## Further reading
 
-The checked-in `.env` enables debugging locally; `.env.prod` disables it.
-Keep credentials and real Telegram IDs in ignored `.env.local` /
-`.env.<environment>.local` files or process environment variables.
+- [Pi installation, audio troubleshooting and acceptance](docs/raspberry-pi.md)
+- [Updating an installed service](docs/update.md)
+- [Detector benchmarks and pending hardware checks](docs/benchmarks/pi5-detection.md)
+- [Development and contribution checks](CONTRIBUTING.md)
+- [Security reporting](SECURITY.md)
 
-Use [`.env`](.env) as the settings reference and put private values and overrides
-in `.env.local` (or `.env.prod.local` for `--env prod`). All camera, Telegram,
-detection and audio settings are implemented. Missing credentials allow disarmed
-diagnostics; malformed supplied values fail with safe field names.
-
-Camera connection settings are split into `RTSP_LOGIN`, `RTSP_PASSWORD` (the
-camera verification code), `RTSP_HOST` (IP address or hostname), `RTSP_PORT`,
-and `RTSP_PATH`. The config loader assembles the RTSP URL and percent-encodes raw credentials once.
-
-For an alternative network setup, see the optional
-[camera-network isolation example](docs/raspberry-pi.md#optional-example-camera-network-isolation).
-
-`AUDIO_DEVICE` selects the Raspberry Pi/Linux speaker output. Leave it empty or unset
-to honor the system default ALSA device; a supplied value overrides it. The app
-does not select another output when the configured/default device fails.
-If the Pi reports `audio open error: Unknown error 524`, follow the
-[ALSA default routing fix](docs/raspberry-pi.md#keeping-application-defaults-portable-across-linux-hosts).
-
-Set `AUDIO_VOLUME` to an integer percentage from `0` to `100` to apply the device's
-system-wide playback volume once at service startup. Leave it empty or unset to
-keep the existing mixer volume at startup. Volume control requires `amixer` from `alsa-utils` and
-`AUDIO_DEVICE=default` or a device containing `CARD=`, such as
-`plughw:CARD=UACDemoV10,DEV=0`. A startup mixer error is logged and shown in
-`/audio_status`; the service remains available for diagnostics. Restart after changing
-the initial setting. `/arm` does not apply volume or require `amixer`.
-
-Use `/volume 50` in Telegram to set volume immediately. Values from `0` (mute)
-through `100` are accepted, including while sound is playing or the camera is
-unavailable. A failed change reports the mixer error and keeps the previous
-reported value. It does not change protection, stop playback, or clear alarm
-suppression. Telegram changes are not written to environment files; restart
-reapplies `AUDIO_VOLUME` when configured.
-
-Mixer selection prefers an advertised playback-volume `Master` control, then
-`PCM`, then a single remaining playback-volume control. Common volume controls
-are supported; capture-only controls are excluded. Multiple other controls are
-reported as ambiguous. The app changes the selected ALSA mixer, preserves mute
-switches, and does not use software gain. Playback and mixer defaults are
-configured by Linux and can differ; inspect both before changing host settings.
-Live playback/volume support targets Raspberry Pi and Linux; macOS playback is
-out of scope. Windows CI verifies offline behavior and types.
-
-Folder layout:
-
-- `volume/`: uploaded/generated content, including sample recordings and benchmark output.
-- `system/models/`: detection models.
-- `system/sounds/`: prerecorded sounds, with `common/` and a subfolder for each configured language.
-
-Model and sound paths resolve from the project root, independently of `STORAGE_FOLDER`.
-
-`en` (English) is the default language. You can
-use any language: create `system/sounds/<language>/` and put your PCM WAV files
-there, using the filenames in `AUDIO_SEQUENCE` (`first_warning.wav`,
-`countdown_1.wav`, `countdown_2.wav`, `countdown_3.wav`, and `alarm.wav`). Directory
-names may contain letters, numbers, underscores and hyphens.
-
-For example, create `system/sounds/fr/` for French and set these values in your
-ignored `.env.local` or `.env.prod.local`:
-
-```dotenv
-AUDIO_MAIN_LANGUAGE=fr
-AUDIO_LANGUAGES=fr,en
-```
-
-`AUDIO_MAIN_LANGUAGE` selects the required language, played first for each
-sound key. When unset, it defaults to the sole `AUDIO_LANGUAGES` item, or `en`
-when multiple languages are configured. An explicit value overrides this default.
-Other `AUDIO_LANGUAGES` follow in listed order,
-without repeating the main language; missing secondary files are skipped.
-A `common/<key>.wav` file replaces all language versions for that key. Otherwise,
-a missing main-language file prevents readiness and arming.
-
-The public `.env` uses confidence `0.35`, English audio, initial volume `25`
-and no periodic siren photos. The code fallback for confidence is
-`0.5`. Keep installation-specific preferences in a local override and restart
-after configuration changes.
-
-## Logging
-
-Logs are JSON lines on stdout, with a UTC timestamp, level, service, message, and
-context. Process managers can collect and rotate stdout. No Graylog server is required.
-
-```python
-from app.services.logger import Logger
-
-logger = Logger({"camera": "front-door"})
-logger.info("Camera connected")
-# Inside an exception handler:
-# logger.exception("Camera worker failed")
-```
-
-The entry point configures logging once. Additional Logger instances do not add
-handlers. Use `configure_logging()` when embedding the service in another process.
-Configured credentials and their encoded forms are redacted in final JSON output,
-including tracebacks and third-party logs. Native camera diagnostics are suppressed
-inside the worker; health uses safe fault codes.
-
-Audio failures include the selected device, sound key/asset for playback, and
-the ALSA/OS reason in JSON logs. Backend stderr is drained continuously with
-only its last 4096 bytes retained. Expected failures produce one error record;
-unexpected failures include a traceback. Startup logs show effective audio
-device, volume and languages, without dumping private environment files.
-
-## Commands and behavior
-
-Telegram commands are accepted only from configured numeric user IDs in private
-chats. Edited, duplicate, old, future-dated and pre-reconnect commands are rejected.
-
-On each full service start or restart, the bot registers all seven commands in
-Telegram's command menu and sends a startup notice to `TELEGRAM_CHAT_ID` with the
-start time and a reminder that it started disarmed. Every outgoing Telegram message,
-including photos and notifications, includes a persistent keyboard with all
-commands. Keyboard buttons use the same authorization and freshness checks as
-typed commands. If Telegram is offline
-at startup, setup and delivery retry when connectivity returns. Successful startup
-notices are not repeated on a Telegram reconnect.
-
-Status replies group protection, component health and notification delivery instead
-of sending JSON. Commands and incident notifications use bold headings, readable
-reasons and italic guidance; event times are labelled UTC. Audio-fault messages
-explain how to resume automatic alarms with a successful `/arm`.
-
-| Command | Result |
-| --- | --- |
-| `/status` | Protection, component/queue health, CPU temperature, service uptime, load averages, host memory and last frame age; audio health summary |
-| `/audio_status` | Audio configuration, backend, playback hardware inventory, default/selected mixer info, playback-volume controls, measured levels/switches and last failure |
-| `/photo` | Wait up to 5 seconds for a frame captured after the request and send it to the requesting chat; report unavailable if no fresh frame arrives |
-| `/arm` | Check camera/detector/audio readiness, clear suppression and arm; keep volume unchanged |
-| `/disarm` | Disable automation and stop all playback |
-| `/alarm` | Manual siren, including while disarmed or RTSP is unavailable; needs WAV assets and aplay, leaves volume unchanged; at most 60 seconds |
-| `/stop` | Stop playback, keep armed mode, reset siren allowance and require fresh confirmation |
-| `/volume 50` | Set volume to 50%; accepts integers 0–100 and keeps alarm/protection state unchanged |
-| `/help` | Command summary |
-
-Defaults: confirm for 2 seconds by day and 3 seconds from 22:00 to 06:00 in
-Europe/Prague; require at least 3 frames and positive gaps no greater than
-1 second. Fresh negatives spanning 2 seconds confirm absence. Frames older than
-2 seconds cancel automatic audio as unknown visibility. Worker recovery preserves
-armed mode but requires fresh confirmation; full service restart starts disarmed.
-Audio faults require a successful explicit `/arm`, even after absence or recovery.
-
-Host metrics refresh in the background every five seconds. Load averages cover
-1/5/15 minutes and are not CPU utilization percentages. Host memory is
-`MemTotal - MemAvailable`, shown alongside total usable memory in MiB. CPU
-temperature uses a CPU thermal zone in Linux sysfs; memory uses `/proc/meminfo`.
-Individual unsupported, unreadable or invalid metrics display `Unavailable`
-without affecting protection or bot commands. Service uptime uses a monotonic
-clock; last frame age remains visible after camera loss. No frame ever received
-is shown explicitly. The kernel documents the [thermal-zone units](https://kernel.org/doc/html/v5.7/driver-api/thermal/sysfs-api.html)
-and [memory fields](https://www.kernel.org/doc/html/latest/filesystems/proc.html).
-
-`/audio_status` shows the configured audio device, initial volume, last
-successfully applied volume, and latest audio failure with its UTC timestamp.
-The last applied volume is unknown until the service successfully sets it.
-Measured mixer percentages/switch states are read separately from ALSA and can
-reflect changes by other applications. That failure is
-history retained until another failure or restart, even after recovery. A ready
-asset/backend check does not prove the speaker can play. Manual alarms do not
-require camera/model/detector readiness or `amixer`; camera faults leave an
-active manual siren running, while automatic alarms still stop on vision faults.
-Audio status runs bounded read-only queries as the service account. A device
-listed in the inventory is not proof that it can open or produce audible sound.
-Audio-fault deactivation notifications also include the sanitized backend error
-captured for that playback, so the cause is visible without a separate status request.
-
-Automatic alarms are allowed whenever armed, both day and night. Night hours
-only select the confirmation time; they do not arm the service.
-
-Day/night confirmation runs before “Person recognized”. “Person is still there”
-is sent after all selected `first_warning` WAVs finish, if the latest fresh
-observation detects a person. The interval between these messages is the warning
-playback time; it does not include another confirmation or absence delay.
-`DETECTION_ABSENCE_SECONDS` requires fresh negative observations to confirm
-departure. Local environment files and process variables can override `.env`.
-
-Once confirmed, play `first_warning` and every countdown key to completion,
-even if the person leaves. The files play back-to-back, without an extra pause.
-After countdown, start the siren if a fresh observation detects a person. If the
-latest observation is negative, wait for a detection or confirmed absence;
-confirmed absence ends the incident without a siren.
-
-The siren WAV repeats for the full `AUDIO_MAX_ALARM_SECONDS` period (default 60),
-even if the person leaves during playback. At the period boundary, confirmed
-absence ends the incident. Otherwise, playback continues immediately into the
-next siren period, up to `AUDIO_MAX_ALARM_CYCLES` total (default 3: initial plus
-two repeats). Warnings/countdowns and activation notifications are not repeated.
-Returning before the current period ends does not reset this count. Reaching the
-limit suppresses automatic playback until confirmed absence, `/stop` or an explicit `/arm`.
-Vision-worker recovery preserves periods already used. `/stop`, `/disarm`, audio
-failure and loss of camera visibility interrupt automatic playback immediately.
-Manual `/alarm` has one period; overriding an automatic siren keeps the current
-period's deadline.
-
-After `/stop`, an armed system can start another warning/countdown sequence once
-person detection is freshly confirmed, even if the person remains in view.
-Audio-fault suppression still requires a successful `/arm`.
-
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `DETECTION_DAY_CONFIRM_SECONDS` | `2` | Presence time before the first warning by day |
-| `DETECTION_NIGHT_CONFIRM_SECONDS` | `3` | Presence time before the first warning at night |
-| `DETECTION_NIGHT_START` / `DETECTION_NIGHT_END` | `22:00` / `06:00` | Night profile in `DETECTION_TIMEZONE` (`Europe/Prague`) |
-| `DETECTION_ABSENCE_SECONDS` | `2` | Fresh negative observations required to confirm departure |
-| `DETECTION_ON_ALARM_SEND_PHOTO_EVERY_MS` | `0` | Milliseconds between Telegram photos while the siren plays; `0` disables periodic photos |
-| `AUDIO_MAX_ALARM_SECONDS` | `60` | Duration of each siren period; WAVs loop as needed (maximum 60 seconds) |
-| `AUDIO_MAX_ALARM_CYCLES` | `3` | Total automatic siren periods allowed before absence, `/stop` or rearming resets the count |
-
-With the previously tested private Czech and English WAVs, warning/countdown
-playback totals about 18.76 seconds. Continuous detection therefore starts the siren about 20.76 seconds
-after initial detection by day, or 21.76 seconds at night, plus playback/control
-overhead. These WAVs are not distributed. Your WAVs and selected languages
-determine the delay.
-
-An Internet outage leaves an already armed service detecting and playing local
-audio, provided the camera remains reachable on the local network. Telegram
-commands and delivery need connectivity. A full restart during the outage starts
-disarmed; Telegram must reconnect before `/arm` can be received.
-
-The service sends a text notification to `TELEGRAM_CHAT_ID` when the RTSP camera
-stream becomes unavailable and another when fresh frames return, even while
-disarmed. Capture/vision faults and frames older than
-`DETECTION_MAX_FRAME_AGE_SECONDS` count as unavailable. Repeated checks in the same
-state do not repeat the notice. Startup allows 15 seconds plus the configured
-camera open/read timeouts before reporting that no initial frames arrived; a
-successful initial connection sends no recovery notice. These notices use the
-same bounded delivery queue and retry policy as alarm notifications.
-
-Notifications contain event-time images for recognition, activation and deactivation;
-the still-there transition is text only. Set `DETECTION_ON_ALARM_SEND_PHOTO_EVERY_MS`
-to send additional photos during automatic and manual sirens. The first periodic
-photo is due one interval after playback starts; warnings/countdowns send no periodic
-photos. Each photo requires a newer frame within `DETECTION_MAX_FRAME_AGE_SECONDS`.
-Missed intervals do not produce catch-up bursts. The timer continues across siren
-periods and manual override, and resets when playback ends. The interval accepts
-milliseconds from `0` to `3600000`, including fractions. Restart after changing it.
-
-Photos remain in memory. Delivery is bounded
-to 20 events and 32 MiB, including the in-flight item, with a 120-second expiry and
-at most 3 send attempts. Delivery can duplicate a message after an uncertain network
-outcome; incident IDs and timestamps identify it. Drops are summarized on recovery.
-
-## Development
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution checks and
-[SECURITY.md](SECURITY.md) for private vulnerability reporting.
-The GitHub CI workflow is configured to run offline startup checks, unit tests
-and mypy on Ubuntu and Windows with Python 3.11 and 3.14. It does not validate
-Raspberry Pi hardware.
-
-```sh
-poetry run python -m unittest discover -s app_tests -v
-poetry run mypy
-poetry check --strict
-```
-
-VS Code includes a module-based debug configuration. Select the Poetry environment
-as the Python interpreter. You can also use `poetry run python -m app.debugger`.
-
-Runtime dependencies are python-dotenv, NumPy, opencv-python-headless and
-python-telegram-bot, plus tzdata on Windows. Install only one OpenCV distribution.
-Tests use synthetic images and fake capture/player/Telegram boundaries; they do
-not contact a camera or bot or play audio. Mypy is a development dependency.
-
-## PM2 (optional)
-
-With PM2 already installed:
-
-```sh
-pm2 start server.json
-pm2 start server.json --env dev
-pm2 start server.json --env prod
-```
-
-Run these commands from the project root. The config watches `app` and environment
-files, and excludes tests and storage.
-Use one process manager per camera/bot. The recommended Pi systemd template and
-supervised acceptance checklist are in [the deployment guide](docs/raspberry-pi.md).
-
-## Documentation
-
-- [Raspberry Pi service updates](docs/update.md)
-- [Poetry](https://python-poetry.org/docs/)
-- [python-dotenv configuration](https://github.com/theskumar/python-dotenv#load-configuration-without-altering-the-environment)
+Licensed under [Apache-2.0](LICENSE). See [NOTICE](NOTICE) for third-party attribution.

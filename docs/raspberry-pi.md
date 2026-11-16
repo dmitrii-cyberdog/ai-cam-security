@@ -1,7 +1,7 @@
 # Raspberry Pi installation and supervised acceptance
 
-This is a reviewable deployment guide. No Pi installation, camera connection,
-speaker test, Telegram message or systemd change was performed during development.
+Requires Raspberry Pi OS 64-bit, Python 3.11-3.14, Poetry 2.x and `alsa-utils`.
+Hardware acceptance remains pending.
 The service starts **disarmed after every full restart**, including reboot.
 
 For an existing installation, follow the [update guide](update.md) after pulling
@@ -99,52 +99,18 @@ system/sounds/en/countdown_2.wav
 system/sounds/en/countdown_3.wav
 ```
 
-`en` is the default, not a fixed list of supported languages. To use any
-other language, create `system/sounds/<language>/` with the same WAV filenames
-and set `AUDIO_MAIN_LANGUAGE` and `AUDIO_LANGUAGES` in `.env.prod.local` to your
-directory names. With a single `AUDIO_LANGUAGES` item, `AUDIO_MAIN_LANGUAGE` can
-be omitted and defaults to that language; with multiple items it defaults to `en`.
-Use letters, numbers, underscores and hyphens in those names.
-See the [French configuration example](../README.md#configuration).
+Set `AUDIO_MAIN_LANGUAGE` and `AUDIO_LANGUAGES` to add languages using the same
+filenames under `system/sounds/<language>/`. Common files override language versions;
+main-language files are required, missing secondary files are skipped.
 
-Default playback: English for each key, then common alarm. A common
-file takes precedence over language versions. Warning/countdown files play once;
-the alarm WAV repeats throughout each siren period. Without a common file, the
-main-language file is required; missing secondary-language files are skipped. Files must resolve inside
-the sound root and have readable WAV headers. Leave `AUDIO_DEVICE` empty or unset
-to use the system default ALSA device. To override it, set a verified ALSA device
-(for example `plughw:CARD=<actual-card>,DEV=0`). Use `aplay -l`/`aplay -L` to inspect actual devices. Verify access as
-the service account without relying on an interactive desktop audio session.
+Leave `AUDIO_DEVICE` empty for ALSA default, or set a verified device such as
+`plughw:CARD=UACDemoV10,DEV=0`. Use your actual card name.
+`AUDIO_VOLUME` accepts 0-100 and sets system mixer volume once at startup;
+empty leaves volume unchanged. Volume control needs `amixer` and a default or `CARD=` device.
 
-To set initial device volume at service startup, put an integer percentage in `.env.prod.local`:
-
-```dotenv
-AUDIO_DEVICE=plughw:CARD=UACDemoV10,DEV=0
-AUDIO_VOLUME=75
-```
-
-Use the verified card name for your speaker. `AUDIO_VOLUME` accepts `0` to `100`;
-empty or unset leaves volume unchanged at startup. The service sets the card's
-playback volume through `amixer` once before Telegram starts. With volume configured,
-`AUDIO_DEVICE` must be `default` or contain `CARD=`. Verify that the service account
-can inspect the card's playback mixer controls:
-
-```sh
-sudo -u ai-cam-security amixer -c UACDemoV10 scontents
-```
-
-Restart after configuration changes. A missing mixer control, permission error or
-volume-command failure is logged and retained in status; diagnostics continue.
-Neither `/arm` nor manual `/alarm` reapplies `AUDIO_VOLUME` or requires `amixer`.
-
-Use `/volume 50` to change volume from Telegram without a restart. It accepts
-integers from `0` (mute) to `100`, works without RTSP and during playback, and
-does not arm/disarm, stop sound or clear suppression. The reply confirms success
-only after the mixer command succeeds. Changes are not persisted to env files;
-restart reapplies the configured initial value. `/volume` or its keyboard button
-shows usage. `/audio_status` distinguishes the initial value, last successfully
-applied percentage, and measured mixer volume/switch state. An unknown last-applied
-value means the service has not set it.
+Use `/volume 50` for an immediate change without restarting. Changes do not persist;
+restart reapplies `AUDIO_VOLUME`. `/arm` and `/alarm` leave volume unchanged.
+Restart after environment-file changes.
 
 ### Diagnosing audio failures
 
@@ -208,20 +174,10 @@ default once on each host; the app does not infer which physical speaker you
 intend to use. Desktop audio-manager defaults and a headless system account's
 ALSA defaults may differ.
 
-On 2026-11-09, the operator confirmed that configuring the system default as
-described below resolved this playback failure on the reported Pi:
-
-```text
-audio_exit_1; device=default; key=alarm; asset=common/alarm.wav: aplay: main:850: audio open error: Unknown error 524
-```
-
-The default mixer identified `vc4hdmi0` (HDMI card 0), with no simple mixer
-controls. The USB speaker was `UACDemoV10` (card 2), with a playback-volume
-`PCM` control and playback switches on. Neither `/etc/asound.conf` nor the
-operator's `~/.asoundrc` existed. Missing HDMI volume controls explained the
-separate startup volume failure; playback failed while opening the default
-device, before reading the WAV. This case does not establish the cause of every
-ALSA error 524.
+If default playback fails with `audio open error: Unknown error 524`, inspect
+ALSA routing. On one reported Pi, default playback/mixer targeted HDMI while the
+speaker was USB `UACDemoV10`. Setting both defaults to USB resolved it; other
+524 errors may have different causes.
 
 Run the following commands as the account running the app, from the project
 directory. A personal login and a dedicated service account may have different
@@ -285,30 +241,9 @@ history can still contain the earlier failure after playback succeeds. The
 operator reported working playback after this change; no agent-run live Pi
 test was performed. Listing a USB card alone does not prove sound output.
 
-Automatic alarms work whenever armed, day and night. The first warning starts
-after 2 seconds of confirmed presence by day or 3 seconds at night (22:00–06:00,
-Europe/Prague). Finish all warning/countdown files even after departure, then
-start the siren only if a fresh detection still shows a person; uncertain absence
-waits for detection or the 2-second confirmed-absence threshold.
-
-Set `AUDIO_MAX_ALARM_SECONDS=60` and `AUDIO_MAX_ALARM_CYCLES=3` for the agreed
-behavior: each started siren period finishes its 60 seconds even after departure.
-At its boundary, stop if absence is confirmed; otherwise continue directly with
-the siren, up to three total periods. The alarm file loops as needed, with no
-repeat of warnings or countdowns between periods. Stop/disarm and faults still
-interrupt playback. See [the behavior and settings](../README.md#commands-and-behavior).
-
-## Optional example: camera network isolation
-
-An alternative deployment could put an RTSP-only camera on a dedicated VLAN or
-SSID with router-enforced isolation. Router rules could allow camera access
-from the Raspberry Pi and selected administration devices while blocking other
-home-LAN clients and Internet access to the camera's RTSP port.
-
-A remote client could connect through an encrypted tunnel ending on the Pi.
-The Pi-to-camera hop would still use plain RTSP inside the isolated network;
-the tunnel protects only the traffic carried through it. This is an optional
-deployment example, not a requirement for the existing home-LAN setup.
+See [alarm behavior](../README.md#alarm-behavior) for presence, countdown and siren rules.
+Day/night confirmation uses `DETECTION_DAY_CONFIRM_SECONDS` and
+`DETECTION_NIGHT_CONFIRM_SECONDS` from the effective configuration.
 
 ## 3. Offline checks and measurement gate
 
@@ -367,17 +302,19 @@ Expected: no unit syntax errors. Executable/path/account-related checks require
 the prepared installation and account. This command was not available in the
 Windows development environment and remains pending.
 
-Concrete changes requiring authorization:
+After reviewing the unit and approving installation/start on the target host:
 
-1. Install the reviewed source/venv/assets in `/opt/ai-cam-security`; create the
-   dedicated account, audio membership and private env file permissions.
-2. Copy the reviewed unit to `/etc/systemd/system/ai-cam-security.service` and run
-   `systemctl daemon-reload`.
-3. Start disarmed with `systemctl start ai-cam-security`; inspect
-   `systemctl status ai-cam-security` and `journalctl -u ai-cam-security`.
-4. Perform the explicit camera, speaker and Telegram checks below under supervision.
-5. Only after acceptance, authorize `systemctl enable ai-cam-security` and a reboot
-   test. Do not run PM2 and systemd for the same camera/bot.
+```sh
+sudo cp deploy/ai-cam-security.service /etc/systemd/system/ai-cam-security.service
+sudo systemctl daemon-reload
+sudo systemctl start ai-cam-security
+sudo systemctl status ai-cam-security --no-pager
+sudo journalctl -u ai-cam-security -n 100 --no-pager
+```
+
+Enable boot startup only after supervised acceptance with
+`sudo systemctl enable ai-cam-security`, then verify a reboot.
+Use one process manager per camera/bot.
 
 If the journal reports `Failed to determine user credentials` or
 `Failed at step USER`, systemd failed before launching Python. Inspect the
@@ -397,12 +334,12 @@ authorized service start. Inspect fresh journal entries for any subsequent error
 ## 5. Supervised acceptance record
 
 Record date, configuration excluding secrets, artifact hash, pass/fail and measured
-latency for each row. These tests **have not been performed**.
+latency for each row. Full supervised acceptance remains pending.
 
 | Check | Expected result |
 | --- | --- |
 | Startup/status; unauthorized/private/group/edited commands | Disarmed; startup notice and status reply include all command buttons; Telegram command menu registered; only allowlisted private original fresh commands execute |
-| Day/night entry and stationary presence | Confirmation at 2/3 seconds with >=3 distinct frames; frozen profile per candidate |
+| Day/night entry and stationary presence | Configured day/night confirmation with >=3 distinct frames; frozen profile per candidate |
 | Complete incident | Recognized photo, still-there text, activated photo, deactivated photo in order |
 | Leave during warning or each countdown key | Finish every warning/countdown file; confirmed absence at the end skips the siren and activated event |
 | Leave during siren | Finish the current 60-second period, then stop if absence remains confirmed |
